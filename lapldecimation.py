@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.ndimage as ndimage
-from scipy.sparse import csr_matrix, diags
+from scipy.sparse import csr_matrix, diags, eye
 from scipy.sparse.linalg import spsolve
 from scipy.spatial.distance import cdist
 
@@ -10,20 +10,54 @@ def compute_laplacian_matrix(X, adjacency_matrix):
     Compute the standard Graph Laplacian Matrix L = D - W.
 
     Using simple reciprocal Euclidean distance weights for spatial affinity.
+def compute_laplacian_matrix(
+    X, adjacency_matrix, use_anisotropic=True, alpha_norm=1.5, alpha_tang=0.1
+):
+    """
+    Compute the Graph Laplacian Matrix L = D - W.
+
+    Supports toggling between:
+      1. Standard (Isotropic) Laplacian: Purely reciprocal Euclidean distance weights.
+      2. Anisotropic Laplacian: Multiplies distance affinity by directional alignment factors
+         to penalize longitudinal shrinkage while favoring radial cross-sectional collapse.
     """
     n_vertices = X.shape[0]
 
     # Get row and col indices from the sparse adjacency matrix
     rows, cols = adjacency_matrix.nonzero()
 
-    # Calculate Euclidean distances for connected pairs
-    distances = np.linalg.norm(X[rows] - X[cols], axis=1)
+    # 1. Compute spatial difference vectors and Euclidean distances
+    diffs = X[rows] - X[cols]
+    distances = np.linalg.norm(diffs, axis=1)
+    distances = np.maximum(distances, 1e-6)  # Prevent division by zero
 
-    # Avoid division by zero for identical overlapping vertices
-    distances = np.maximum(distances, 1e-6)
-    weights = 1.0 / distances
+    if use_anisotropic:
+        # Estimate local structural tangents using local neighborhood PCA proxy
+        tangents = np.zeros_like(X)
+        for i in range(n_vertices):
+            neighbors = cols[rows == i]
+            if len(neighbors) > 1:
+                cov = np.cov(X[neighbors].T)
+                eigvals, eigvecs = np.linalg.eigh(cov)
+                tangents[i] = eigvecs[:, -1]  # Principal directional eigenvector
+            else:
+                tangents[i] = np.array([1.0, 0.0, 0.0])
 
-    # Build weight matrix Wn_vertices
+        t_i = tangents[rows]
+        dot_products = np.sum(diffs * t_i, axis=1)
+
+        # Decompose into longitudinal and cross-sectional components
+        tangential_comps = np.abs(dot_products)
+        normal_comps = np.linalg.norm(diffs - (dot_products[:, None] * t_i), axis=1)
+
+        # Scale the affinity weights using the anisotropy parameters
+        aniso_mod = (alpha_norm * normal_comps) + (alpha_tang * tangential_comps)
+        weights = aniso_mod / distances
+    else:
+        # Standard Isotropic Weights
+        weights = 1.0 / distances
+
+    # Assemble sparse operators
     W = csr_matrix((weights, (rows, cols)), shape=(n_vertices, n_vertices))
 
     # Build diagonal degree matrix D
@@ -33,7 +67,7 @@ def compute_laplacian_matrix(X, adjacency_matrix):
         shape=(n_vertices, n_vertices),
     )
 
-    L = D - W
+    return D - W
     return L
 
 
