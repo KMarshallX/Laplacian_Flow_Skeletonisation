@@ -1,5 +1,6 @@
 import numpy as np
-from scipy.sparse import csr_matrix, eye
+import scipy.ndimage as ndimage
+from scipy.sparse import csr_matrix, diags
 from scipy.sparse.linalg import spsolve
 from scipy.spatial.distance import cdist
 
@@ -22,7 +23,7 @@ def compute_laplacian_matrix(X, adjacency_matrix):
     distances = np.maximum(distances, 1e-6)
     weights = 1.0 / distances
 
-    # Build weight matrix W
+    # Build weight matrix Wn_vertices
     W = csr_matrix((weights, (rows, cols)), shape=(n_vertices, n_vertices))
 
     # Build diagonal degree matrix D
@@ -32,7 +33,6 @@ def compute_laplacian_matrix(X, adjacency_matrix):
         shape=(n_vertices, n_vertices),
     )
 
-    # L = D - W
     L = D - W
     return L
 
@@ -84,29 +84,39 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     return new_X, new_adj
 
 
-def laplacian_graph_contraction(
+def laplacian_graph_contraction_edt(
     X_init,
     adj_init,
+    edt_volume,
     w_L=1.0,
-    w_H=0.1,
+    w_H_base=0.1,
+    delta=0.5,
     max_iter=20,
     tol=1e-3,
     decimate_every=2,
     min_edge_length=0.5,
 ):
     """
-    Carries out the Laplacian Flow Dynamics optimization loop for graph contraction.
+    Carry out Laplacian Flow Dynamics.
+
+    It uses optimization using 3D Euclidean Distance Transform (EDT) to dynamically
+    scale retention forces and keep centerlines bounded inside the segmentation.
 
     Parameters
     ----------
     X_init : ndarray of shape (N, 3)
-        Initial 3D coordinates of the graph vertices embedded within the vessel segmentations.
+        Initial 3D coordinates of the graph vertices.
     adj_init : csr_matrix of shape (N, N)
-        Boolean/binary sparse adjacency matrix representing the initial network connectivity.
+        Boolean sparse adjacency matrix representing initial network connectivity.
+    edt_volume : ndarray of shape (D, H, W)
+        Pre-computed 3D Euclidean Distance Transform volume of the vessel mask.
+        Voxels represent distance to the nearest background/boundary (higher value = deeper inside).
     w_L : float
-        Contraction weight coefficient forcing nodes toward their local neighborhood center.
-    w_H : float
-        Retention weight coefficient acting as a longitudinal anchor.
+        Contraction weight coefficient forcing nodes toward neighborhood centers.
+    w_H_base : float
+        The base baseline retention weight coefficient.
+    delta : float
+        A smoothing stabilizer parameter to avoid infinite exponential spikes at boundaries.
     max_iter : int
         Maximum number of flow iterations.
     tol : float
@@ -126,42 +136,51 @@ def laplacian_graph_contraction(
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
 
-    print(f"Starting contraction with {X.shape[0]} vertices...")
+    vol_shape = edt_volume.shape
+    print(f"Starting EDT-guided contraction with {X.shape[0]} vertices...")
 
     for i in range(max_iter):
-        n_vertices = X.shape[0]
-
         # 1. Compute the current graph Laplacian matrix L
         L = compute_laplacian_matrix(X, adj)
-
-        # 2. Formulate the Implicit Linear System: (w_L^2 * L^2 + w_H^2 * I) X^(t+1) = w_H^2 * X^(t)
-        # To avoid computing L^2 explicitly (which ruins sparsity), we can stack systems or solve carefully.
-        # Alternatively, a common way to evaluate L^2 implicitly or directly:
         L_squared = L.dot(L)
 
-        A = (w_L**2) * L_squared + (w_H**2) * eye(n_vertices, format="csr")
-        B = (w_H**2) * X
+        # 2. Extract local EDT values for every node via nearest voxel mapping
+        # Clip coordinates to guarantee they stay within grid array dimensions
+        ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
+        iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
+        iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
 
-        # 3. Solve for the updated positions X_next
+        node_distances = edt_volume[ix, iy, iz]
+
+        # 3. Calculate spatially varying retention forces w_H per node
+        # As distance to background boundary -> 0, w_H scales up exponentially
+        w_H_per_node = w_H_base * np.exp(1.0 / (node_distances + delta))
+
+        # Construct diagonal matrices for the updated matrix formulation:
+        # (w_L^2 * L^2 + W_H^2) X^(t+1) = W_H^2 * X^(t)
+        W_H_sq = diags(w_H_per_node**2, format="csr")
+
+        A = (w_L**2) * L_squared + W_H_sq
+        B = W_H_sq.dot(X)
+
+        # 4. Solve the Implicit Linear System independently for X, Y, Z axes
         X_next = np.zeros_like(X)
-        for dim in range(3):  # Solve independently for X, Y, Z axes
+        for dim in range(3):
             X_next[:, dim] = spsolve(A, B[:, dim])
 
-        # Calculate displacement to track convergence
         displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
         X = X_next
 
         print(
-            f"Iteration {i + 1}/{max_iter} - Displacement Error: {displacement:.6f} - "
-            f"Nodes: {X.shape[0]}"
+            f"Iter {i + 1}/{max_iter} - Max w_H Pull: {np.max(w_H_per_node):.4f} -"
+            f" Nodes: {X.shape[0]}"
         )
 
-        # Check convergence condition
         if displacement < tol:
             print("Convergence criteria met.")
             break
 
-        # 4. Structural Decimation Step (E-collapse)
+        # 5. Structural Decimation Step (E-collapse)
         if (i + 1) % decimate_every == 0:
             X, adj = edge_collapse_decimation(X, adj, min_edge_length)
 
@@ -169,44 +188,58 @@ def laplacian_graph_contraction(
 
 
 # ==========================================
-# EXAMPLE USAGE: Simulating a Hollow Cylinder/Vessel Tube
+# EXAMPLE VALIDATION: Simulating a Hollow Tube Volume
 # ==========================================
 if __name__ == "__main__":
-    # 1. Generate dummy point cloud of a 3D cylindrical tube (vessel segment)
-    np.random.seed(42)
-    t = np.linspace(0, 10, 200)
-    theta = np.random.uniform(0, 2 * np.pi, 200)
-    radius = 2.0
+    # 1. Create a binary mask volume containing a 3D horizontal tube vessel segment
+    volume_size = (30, 30, 30)
+    binary_mask = np.zeros(volume_size, dtype=bool)
 
-    # Add coordinates: X creates the length, Y and Z create the vessel tube volume
-    x_coords = t
-    y_coords = radius * np.cos(theta)
-    z_coords = radius * np.sin(theta)
-    X_vessel = np.column_stack((x_coords, y_coords, z_coords))
+    # Fill array elements where Y-Z radius <= 6 to carve out a solid tube along the X axis
+    grid_x, grid_y, grid_z = np.indices(volume_size)
+    radial_dist_from_center = np.sqrt((grid_y - 15) ** 2 + (grid_z - 15) ** 2)
+    binary_mask[(radial_dist_from_center <= 6) & (grid_x >= 2) & (grid_x <= 27)] = True
 
-    # 2. Compute a proximity-based initial geometric graph graph adjacency (k-NN proxy)
-    # Connect pairs that are physically close within the volume
+    # Compute the 3D Euclidean Distance Transform map
+    # Background voxels are 0; Internal core centerline voxels peak at around 6.0
+    edt_volume = ndimage.distance_transform_edt(binary_mask)
+
+    # 2. Extract initial point coordinates lying right on the outer hull of the vessel
+    # (Mimics noisy graph initialization configurations bound by outer boundaries)
+    vessel_boundary_indices = np.argwhere(
+        (radial_dist_from_center >= 5)
+        & (radial_dist_from_center <= 6)
+        & (grid_x >= 3)
+        & (grid_x <= 26)
+    )
+    X_vessel = vessel_boundary_indices.astype(float)
+
+    # Establish proximity connectivity graph [cite: 20]
     dists = cdist(X_vessel, X_vessel)
-    adj_matrix = dists < 1.5
-    np.fill_diagonal(adj_matrix, 0)  # clear self-connections
+    adj_matrix = (dists > 0) & (dists < 2.5)
     adj_sparse = csr_matrix(adj_matrix)
 
-    # 3. Run the Laplacian flow contraction
-    # w_L > w_H to favor rapid inward radial collapse over retention
-    contracted_X, final_adj = laplacian_graph_contraction(
+    # 3. Run the EDT-Guided Laplacian flow contraction
+    contracted_X, final_adj = laplacian_graph_contraction_edt(
         X_vessel,
         adj_sparse,
-        w_L=1.2,
-        w_H=0.2,
-        max_iter=10,
+        edt_volume=edt_volume,
+        w_L=1.5,
+        w_H_base=0.1,
+        delta=0.4,
+        max_iter=12,
         decimate_every=2,
-        min_edge_length=0.8,
+        min_edge_length=1.0,
     )
 
+    # Confirm that all centerline endpoints are strictly contained inside the segmentation domain
+    ix = np.clip(np.round(contracted_X[:, 0]).astype(int), 0, volume_size[0] - 1)
+    iy = np.clip(np.round(contracted_X[:, 1]).astype(int), 0, volume_size[1] - 1)
+    iz = np.clip(np.round(contracted_X[:, 2]).astype(int), 0, volume_size[2] - 1)
+    inside_count = np.sum(binary_mask[ix, iy, iz])
+
     print("\nSkeletonization Complete!")
-    print(f"Original Volume Points: {X_vessel.shape[0]}")
-    print(f"Contracted Centerline Nodes: {contracted_X.shape[0]}")
+    print(f"Total Contracted Nodes: {contracted_X.shape[0]}")
     print(
-        "Average Y-Z deviation from center (ideal is 0): "
-        f"{np.mean(np.abs(contracted_X[:, 1:])):.4f}"
+        f"Nodes successfully locked inside the segmentation container: {inside_count} out of {contracted_X.shape[0]}"
     )

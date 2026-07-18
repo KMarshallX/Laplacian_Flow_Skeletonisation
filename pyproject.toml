@@ -19,6 +19,8 @@ convention = 'numpy'
   'B904', # 'Within an except clause, raise exceptions with raise ... from ...'
   'UP007', # 'Use `X | Y` for type annotations', requires python 3.10
   'N816', # Math is math. Leave me alone.
+  'N806',
+  'N803'
 ]
 '*.pyi' = ['E501']
 '__init__.py' = ['F401']
