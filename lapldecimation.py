@@ -41,7 +41,7 @@ def _get_parser():
         "-o",
         dest="out_path",
         type=str,
-        default="skeleton_output.npz",
+        default=None,
         help="Path destination for the generated skeleton arrays.",
     )
     optional.add_argument(
@@ -313,7 +313,7 @@ def laplacian_graph_contraction_edt(
             node_distances = edt_volume[ix, iy, iz]
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
             W_H_sq = sparse.diags(w_H_per_node**2, format="csr")
-            max_pull = f"- Max EDT w_H Pull: {np.max(w_H_per_node):.4f}"
+            max_pull = f" - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}"
         else:
             W_H_sq = sparse.eye(n_vertices, format="csr") * (w_H_base**2)
 
@@ -397,6 +397,34 @@ def graph_to_dense_3d(X, adjacency_matrix, target_shape):
     return dense_volume
 
 
+def coords_to_dense_3d(X, target_shape):
+    """
+    Rasterizes an abstract graph topology into a dense 3D binary volume.
+
+    Parameters
+    ----------
+    X : ndarray of shape (N, 3)
+        The 3D coordinates of the vertices/nodes.
+    target_shape : tuple of int (D, H, W)
+        The structural grid dimensions of the target 3D matrix.
+
+    Returns
+    -------
+    dense_volume : ndarray of shape (D, H, W)
+        A binary 3D array where 1 represents the skeleton path.
+    """
+    # 1. Initialize empty dense matrix
+    dense_volume = np.zeros(target_shape, dtype=bool)
+
+    coords = np.rint(X).astype(np.int8)
+
+    # 3. Rasterize edges and nodes into the grid
+    for i in coords:
+        dense_volume[tuple(i)] = True
+
+    return dense_volume
+
+
 def laplacian_skeletonisation(
     nifti_path,
     out_path=None,
@@ -469,7 +497,7 @@ def laplacian_skeletonisation(
     print(f"Saving structural centerline data matrices to: {out_path}")
     np.savez_compressed(f"{out_path}_coords.npz", contracted_X=contracted_X)
     sparse.save_npz(f"{out_path}.npz", final_adj)
-    nifti_skel = graph_to_dense_3d(contracted_X, final_adj, volume_data.shape)
+    nifti_skel = coords_to_dense_3d(contracted_X, volume_data.shape)
     io.export_nifti(nifti_skel, img, f"{out_path}.nii.gz")
 
     return contracted_X, final_adj
