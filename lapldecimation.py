@@ -261,6 +261,7 @@ def laplacian_graph_contraction_edt(
     binary_segmentation=None,
     use_edt=True,
     use_anisotropic=True,
+    enforce_containment=False,
     w_L=0.5,
     w_H_base=0.5,
     beta_edt=1.0,
@@ -276,7 +277,7 @@ def laplacian_graph_contraction_edt(
     Carry out Laplacian Flow Dynamics.
 
     It uses optimization using 3D Euclidean Distance Transform (EDT) to dynamically
-    scale retention forces and keep centerlines bounded inside the segmentation.
+    scale retention forces and optionally enforces hard-voxel mask boundary containment.
 
     Parameters
     ----------
@@ -292,6 +293,9 @@ def laplacian_graph_contraction_edt(
     use_anisotropic : bool, optional
         If True, applies directionally weighted affinity rules prioritizing cross-sectional
         radial contraction over structural longitudinal shrinkage. Default is True.
+    enforce_containment : bool, optional
+        If True, applies a hard projection constraint to force nodes drifting out of the
+        foreground mask onto the closest inner boundary shell surface voxel. Default is False.
     w_L : float, optional
         Contraction weight coefficient forcing nodes toward localized neighborhood geometric centers.
         Default is 0.5.
@@ -330,22 +334,29 @@ def laplacian_graph_contraction_edt(
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
 
-    # Conditional 3D EDT Initialization
+    # Conditional 3D EDT & Hard-Voxel Constraint Lookup Precomputation
     edt_volume = None
-    if use_edt and binary_segmentation is not None:
-        print(
-            "Computing 3D Euclidean Distance Transform map for boundary potential well..."
+    closest_vessels_indices = None
+
+    if (use_edt or enforce_containment) and binary_segmentation is not None:
+        print("Computing 3D EDT Map and boundary projection lookup tensors...")
+        # Inverse transform tells background voxels how far they are from the foreground target mask
+        background_edt, nearest_indices = ndimage.distance_transform_edt(
+            binary_segmentation == 0, return_indices=True
         )
         edt_volume = ndimage.distance_transform_edt(binary_segmentation)
-        vol_shape = edt_volume.shape
-    elif use_edt and binary_segmentation is None:
+        closest_vessels_indices = nearest_indices
+        vol_shape = binary_segmentation.shape
+    elif (use_edt or enforce_containment) and binary_segmentation is None:
         print(
-            "Warning: EDT requested but no segmentation mask provided. Falling back to classic approach."
+            "Warning: No segmentation mask provided. Falling back to classic approach."
         )
         use_edt = False
+        enforce_containment = False
 
     print(
-        f"Starting contraction [Anisotropic={use_anisotropic}, EDT={use_edt}] with {X.shape[0]} nodes..."
+        f"Starting contraction [Anisotropic={use_anisotropic}, EDT={use_edt}, Hard-Containment={enforce_containment}] "
+        f"with {X.shape[0]} nodes..."
     )
 
     for i in range(max_iter):
@@ -363,10 +374,11 @@ def laplacian_graph_contraction_edt(
 
         # 2. Extract localized retention matrix mapping
         max_pull = ""
+        ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
+        iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
+        iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
+
         if use_edt:
-            ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
-            iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
-            iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
             node_distances = edt_volume[ix, iy, iz]
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
             W_H_sq = sparse.diags(w_H_per_node**2, format="csr")
@@ -381,6 +393,35 @@ def laplacian_graph_contraction_edt(
         X_next = np.zeros_like(X)
         for dim in range(3):
             X_next[:, dim] = spsolve(A, B[:, dim])
+
+        # 4. Explicit Hard-Voxel Containment Constraint Projection
+        if enforce_containment:
+            # Re-discretize positions to evaluate mask containment state
+            ix_next = np.clip(np.round(X_next[:, 0]).astype(int), 0, vol_shape[0] - 1)
+            iy_next = np.clip(np.round(X_next[:, 1]).astype(int), 0, vol_shape[1] - 1)
+            iz_next = np.clip(np.round(X_next[:, 2]).astype(int), 0, vol_shape[2] - 1)
+
+            # Find points that fell outside the vessel grid (mask == 0)
+            escaped_mask = binary_segmentation[ix_next, iy_next, iz_next] == 0
+            escaped_count = np.sum(escaped_mask)
+
+            if escaped_count > 0:
+                # Extract precomputed closest coordinate index maps for escaped nodes
+                proj_x = closest_vessels_indices[0][
+                    ix_next[escaped_mask], iy_next[escaped_mask], iz_next[escaped_mask]
+                ]
+                proj_y = closest_vessels_indices[1][
+                    ix_next[escaped_mask], iy_next[escaped_mask], iz_next[escaped_mask]
+                ]
+                proj_z = closest_vessels_indices[2][
+                    ix_next[escaped_mask], iy_next[escaped_mask], iz_next[escaped_mask]
+                ]
+
+                # Project continuous coordinates onto the target boundary shell voxels
+                X_next[escaped_mask] = np.stack(
+                    [proj_x, proj_y, proj_z], axis=1
+                ).astype(float)
+                max_pull += f" [Projected: {escaped_count} escaped nodes]"
 
         displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
         X = X_next
