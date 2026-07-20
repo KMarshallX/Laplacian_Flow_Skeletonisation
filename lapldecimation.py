@@ -72,15 +72,22 @@ def _get_parser():
     optional.add_argument(
         "--w_L",
         type=float,
-        default=1.2,
+        default=0.5,
         help="Contraction weight scalar multiplier variable.",
     )
     optional.add_argument(
         "--w_H",
         dest="w_H_base",
         type=float,
-        default=0.2,
+        default=0.5,
         help="Baseline structural anchor retention weight variable.",
+    )
+    optional.add_argument(
+        "--decimate_every",
+        dest="decimate_every",
+        type=int,
+        default=2,
+        help="Decimate nodes every N steps [Default=2].",
     )
     optional.add_argument(
         "--downsample",
@@ -99,10 +106,36 @@ def compute_laplacian_matrix(
     """
     Compute the Graph Laplacian Matrix L = D - W.
 
-    Supports toggling between:
-      1. Standard (Isotropic) Laplacian: Purely reciprocal Euclidean distance weights.
-      2. Anisotropic Laplacian: Multiplies distance affinity by directional alignment factors
-         to penalize longitudinal shrinkage while favoring radial cross-sectional collapse.
+    Supports toggling between
+    -------------------------
+    1. Standard (Isotropic) Laplacian: Purely reciprocal Euclidean distance weights.
+    2. Anisotropic Laplacian: Multiplies distance affinity by directional alignment factors
+       to penalize longitudinal shrinkage while favoring radial cross-sectional collapse.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        An (N, 3) array containing the continuous 3D spatial coordinates of the
+        graph vertices/nodes.
+    adjacency_matrix : scipy.sparse.spmatrix
+        A sparse binary adjacency matrix of shape (N, N) defining the structural
+        connectivity profile between the vertices.
+    use_anisotropic : bool, optional
+        If True, modulates affinity weights using localized directional alignment vectors
+        to encourage radial over longitudinal contraction. If False, defaults to classic
+        isotropic Euclidean distance reciprocals. Default is True.
+    alpha_norm : float, optional
+        The scaling coefficient penalty assigned to normal (cross-sectional radial)
+        displacement components when `use_anisotropic` is active. Default is 1.5.
+    alpha_tang : float, optional
+        The scaling coefficient penalty assigned to tangential (longitudinal direction)
+        displacement components when `use_anisotropic` is active. Default is 0.1.
+
+    Returns
+    -------
+    L : scipy.sparse.csr_matrix
+        The calculated sparse Graph Laplacian Matrix of shape (N, N) governed
+        by the equation L = D - W.
     """
     n_vertices = X.shape[0]
 
@@ -157,7 +190,29 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     """
     Perform structural decimation (E-collapse).
 
-    Do so by merging vertices connected by edges shorter than min_edge_length.
+    Merges vertices connected by edges shorter than min_edge_length to maintain
+    clean topology and prevent node crowding during graph contraction.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        An (N, 3) float array containing the 3D spatial coordinates of the
+        graph's vertices, where N is the number of vertices.
+    adjacency_matrix : scipy.sparse.spmatrix
+        A square, sparse adjacency matrix (e.g., CSR or COO format) of shape (N, N)
+        representing the structural connectivity between nodes.
+    min_edge_length : float
+        The structural distance threshold. Any edge with a Euclidean length shorter
+        than this value will be collapsed.
+
+    Returns
+    -------
+    new_X : numpy.ndarray
+        A (M, 3) float array containing the updated spatial coordinates of the remaining
+        M unique vertices after simplification.
+    new_adj : scipy.sparse.csr_matrix
+        A simplified sparse CSR adjacency matrix of shape (M, M) with self-loops
+        and duplicate edges removed.
     """
     n_vertices = X.shape[0]
     rows, cols = adjacency_matrix.nonzero()
@@ -206,14 +261,14 @@ def laplacian_graph_contraction_edt(
     binary_segmentation=None,
     use_edt=True,
     use_anisotropic=True,
-    w_L=1.0,
-    w_H_base=0.1,
+    w_L=0.5,
+    w_H_base=0.5,
     beta_edt=1.0,
     delta=0.5,
-    max_iter=20,
-    tol=1e-3,
+    max_iter=2000,
+    tol=0.05,
     decimate_every=2,
-    min_edge_length=0.5,
+    min_edge_length=5,
     alpha_norm=1.5,
     alpha_tang=0.1,
 ):
@@ -225,49 +280,52 @@ def laplacian_graph_contraction_edt(
 
     Parameters
     ----------
-    X_init : ndarray of shape (N, 3)
-        Initial 3D coordinates of the graph vertices.
-    adj_init : csr_matrix of shape (N, N)
-        Boolean sparse adjacency matrix representing initial network connectivity.
-    binary_segmentation : None, optional
-        Description
+    X_init : numpy.ndarray
+        Initial 3D coordinates of the graph vertices as an (N, 3) array.
+    adj_init : scipy.sparse.csr_matrix
+        Boolean sparse adjacency matrix representing initial network connectivity of shape (N, N).
+    binary_segmentation : numpy.ndarray, optional
+        The binary segmentation mask volume used to calculate the EDT profile. Default is None.
     use_edt : bool, optional
-        Description
+        If True, enables the Euclidean Distance Transform boundary potential constraint to prevent
+        implosive collapse beyond true anatomy boundaries. Default is True.
     use_anisotropic : bool, optional
-        Description
-    w_L : float
-        Contraction weight coefficient forcing nodes toward neighborhood centers.
-    w_H_base : float
-        The base baseline retention weight coefficient.
+        If True, applies directionally weighted affinity rules prioritizing cross-sectional
+        radial contraction over structural longitudinal shrinkage. Default is True.
+    w_L : float, optional
+        Contraction weight coefficient forcing nodes toward localized neighborhood geometric centers.
+        Default is 0.5.
+    w_H_base : float, optional
+        The baseline structural positional anchor retention weight coefficient. Default is 0.5.
     beta_edt : float, optional
-        Description
-    delta : float
-        A smoothing stabilizer parameter to avoid infinite exponential spikes at boundaries.
-    max_iter : int
-        Maximum number of flow iterations.
-    tol : float
-        Convergence tolerance based on average vertex displacement.
-    decimate_every : int
-        Frequency of contraction steps before triggering structural decimation.
-    min_edge_length : float
-        The length threshold below which edges will be collapsed.
+        Scaling parameter modulate exponent behavior of the EDT boundary attraction potential.
+        Default is 1.0.
+    delta : float, optional
+        A smoothing stabilizer parameter added to the denominator to avoid division-by-zero errors
+        at exact boundary contours. Default is 0.5.
+    max_iter : int, optional
+        Maximum allowed iteration steps for the contraction flow solver. Default is 2000.
+    tol : float, optional
+        Convergence tolerance limit evaluated against mean vertex displacement. Default is 1e-3.
+    decimate_every : int, optional
+        Frequency cadence interval defining how many contraction loop steps occur before triggering
+        an edge-collapse decimation execution. Default is 2.
+    min_edge_length : float, optional
+        The Euclidean spatial threshold criteria below which two connected nodes undergo structural merging.
+        Default is 5.
     alpha_norm : float, optional
-        Description
+        The normal/cross-sectional penalty parameter used during anisotropic calculation phases.
+        Default is 1.5.
     alpha_tang : float, optional
-        Description
+        The tangential/longitudinal orientation penalty parameter used during anisotropic calculation phases.
+        Default is 0.1.
 
-    Deleted Parameters
-    ------------------
-    edt_volume : ndarray of shape (D, H, W)
-        Pre-computed 3D Euclidean Distance Transform volume of the vessel mask.
-        Voxels represent distance to the nearest background/boundary (higher value = deeper inside).
-
-    No Longer Returned
-    ------------------
-    X : ndarray (M, 3)
-        Contracted centerline coordinates.
-    adj : csr_matrix (M, M)
-        Decimated skeleton topology graph.
+    Returns
+    -------
+    X : numpy.ndarray
+        Contracted centerline coordinates as an (M, 3) matrix.
+    adj : scipy.sparse.csr_matrix
+        Decimated skeleton topology graph connectivity representation of shape (M, M).
     """
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
@@ -290,7 +348,6 @@ def laplacian_graph_contraction_edt(
         f"Starting contraction [Anisotropic={use_anisotropic}, EDT={use_edt}] with {X.shape[0]} nodes..."
     )
 
-    # breakpoint()
     for i in range(max_iter):
         n_vertices = X.shape[0]
 
@@ -328,7 +385,6 @@ def laplacian_graph_contraction_edt(
         displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
         X = X_next
 
-        # breakpoint()
         print(
             f"Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - "
             f"Error Drift: {displacement:.5f}{max_pull}"
@@ -340,8 +396,6 @@ def laplacian_graph_contraction_edt(
 
         if (i + 1) % decimate_every == 0:
             X, adj = edge_collapse_decimation(X, adj, min_edge_length)
-
-            # breakpoint()
 
     return X, adj
 
@@ -404,7 +458,7 @@ def coords_to_dense_3d(X, target_shape):
     Parameters
     ----------
     X : ndarray of shape (N, 3)
-        The 3D coordinates of the vertices/nodes.
+        The 3D coordinates of the areas with content.
     target_shape : tuple of int (D, H, W)
         The structural grid dimensions of the target 3D matrix.
 
@@ -431,31 +485,51 @@ def laplacian_skeletonisation(
     use_edt=True,
     use_anisotropic=True,
     beta_edt=1.0,
-    w_L=1.2,
-    w_H_base=0.2,
+    w_L=0.5,
+    w_H_base=0.5,
+    decimate_every=2,
     downsample=False,
 ):
     """
-    Load a nifti file and skeletonise it.
+    Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
 
     Parameters
     ----------
-    nifti_path : TYPE
-        Description
-    out_path : None, optional
-        Description
+    nifti_path : str
+        File system location path pointing directly toward the source input .nii or .nii.gz file.
+    out_path : str, optional
+        Output destination storage path base where resulting arrays and generated skeleton
+        files will be written. Default is None (autogenerated from input file name).
     use_edt : bool, optional
-        Description
+        Enables boundary tracking potential constraints using Euclidean Distance Transforms.
+        Default is True.
     use_anisotropic : bool, optional
-        Description
+        Enables anisotropic geometry handling to penalize internal longitudinal shortening vectors.
+        Default is True.
     beta_edt : float, optional
-        Description
+        Scaling modulation weight assigned to boundary energy calculation properties. Default is 1.0.
     w_L : float, optional
-        Description
+        Contraction weight step modifier targeting structural local geometric collapse. Default is 0.5.
     w_H_base : float, optional
-        Description
+        Baseline structural node anchor positional persistence value metric. Default is 0.5.
+    decimate_every : int, optional
+        Sampling cadence sequence gap length setting how frequently graph e-collapses execute.
+        Default is 2.
     downsample : bool, optional
-        Description
+        Flag setting whether point arrays containing high density are uniformly downsampled
+        to stay within safe RAM footprints. Default is False.
+
+    Returns
+    -------
+    contracted_X : numpy.ndarray
+        An (M, 3) matrix mapping the continuous 3D spatial points along the skeleton path.
+    final_adj : scipy.sparse.csr_matrix
+        The resulting graph sparse adjacency connectivity representation of shape (M, M).
+
+    Raises
+    ------
+    ValueError
+        If the loaded structural NIfTI mask image is completely empty or lacks foreground elements.
     """
     print(f"Ingesting NIfTI image: {nifti_path}")
     _, volume_data, img = io.load_nifti_get_mask(nifti_path, is_mask=True, ndim=3)
@@ -486,6 +560,7 @@ def laplacian_skeletonisation(
         beta_edt=beta_edt,
         w_L=w_L,
         w_H_base=w_H_base,
+        decimate_every=decimate_every,
     )
 
     out_path = (
