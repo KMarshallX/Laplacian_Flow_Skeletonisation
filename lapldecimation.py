@@ -1,10 +1,12 @@
+#!/usr/bin/env python3
+
 import argparse
+import os
 import sys
 
-import nibabel as nib
 import numpy as np
-import scipy.ndimage as ndimage
-from scipy.sparse import csr_matrix, diags, eye
+from nigsp import io
+from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
 from scipy.spatial.distance import cdist
 
@@ -27,6 +29,7 @@ def _get_parser():
     required.add_argument(
         "--input",
         "-i",
+        dest="nifti_path",
         type=str,
         required=True,
         help="Path pointing toward the input .nii or .nii.gz file volume.",
@@ -36,6 +39,7 @@ def _get_parser():
     optional.add_argument(
         "--output",
         "-o",
+        dest="out_path",
         type=str,
         default="skeleton_output.npz",
         help="Path destination for the generated skeleton arrays.",
@@ -73,6 +77,7 @@ def _get_parser():
     )
     optional.add_argument(
         "--w_H",
+        dest="w_H_base",
         type=float,
         default=0.2,
         help="Baseline structural anchor retention weight variable.",
@@ -136,11 +141,11 @@ def compute_laplacian_matrix(
         weights = 1.0 / distances
 
     # Assemble sparse operators
-    W = csr_matrix((weights, (rows, cols)), shape=(n_vertices, n_vertices))
+    W = sparse.csr_matrix((weights, (rows, cols)), shape=(n_vertices, n_vertices))
 
     # Build diagonal degree matrix D
     degree_values = np.array(W.sum(axis=1)).flatten()
-    D = csr_matrix(
+    D = sparse.csr_matrix(
         (degree_values, (range(n_vertices), range(n_vertices))),
         shape=(n_vertices, n_vertices),
     )
@@ -188,7 +193,7 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     new_cols = new_cols[valid_mask]
 
     new_data = np.ones(len(new_rows), dtype=bool)
-    new_adj = csr_matrix(
+    new_adj = sparse.csr_matrix(
         (new_data, (new_rows, new_cols)), shape=(len(unique_verts), len(unique_verts))
     )
 
@@ -285,6 +290,7 @@ def laplacian_graph_contraction_edt(
         f"Starting contraction [Anisotropic={use_anisotropic}, EDT={use_edt}] with {X.shape[0]} nodes..."
     )
 
+    # breakpoint()
     for i in range(max_iter):
         n_vertices = X.shape[0]
 
@@ -306,10 +312,10 @@ def laplacian_graph_contraction_edt(
             iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
             node_distances = edt_volume[ix, iy, iz]
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
-            W_H_sq = diags(w_H_per_node**2, format="csr")
+            W_H_sq = sparse.diags(w_H_per_node**2, format="csr")
             max_pull = f"- Max EDT w_H Pull: {np.max(w_H_per_node):.4f}"
         else:
-            W_H_sq = eye(n_vertices, format="csr") * (w_H_base**2)
+            W_H_sq = sparse.eye(n_vertices, format="csr") * (w_H_base**2)
 
         # 3. Solve Implicit Update System equations
         A = (w_L**2) * L_squared + W_H_sq
@@ -322,6 +328,7 @@ def laplacian_graph_contraction_edt(
         displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
         X = X_next
 
+        # breakpoint()
         print(
             f"Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - "
             f"Error Drift: {displacement:.5f}{max_pull}"
@@ -334,12 +341,65 @@ def laplacian_graph_contraction_edt(
         if (i + 1) % decimate_every == 0:
             X, adj = edge_collapse_decimation(X, adj, min_edge_length)
 
+            # breakpoint()
+
     return X, adj
+
+
+def graph_to_dense_3d(X, adjacency_matrix, target_shape):
+    """
+    Rasterizes an abstract graph topology into a dense 3D binary volume.
+
+    Parameters
+    ----------
+    X : ndarray of shape (N, 3)
+        The 3D coordinates of the vertices/nodes.
+    adjacency_matrix : csr_matrix of shape (N, N)
+        The sparse connectivity matrix representing edges.
+    target_shape : tuple of int (D, H, W)
+        The structural grid dimensions of the target 3D matrix.
+
+    Returns
+    -------
+    dense_volume : ndarray of shape (D, H, W)
+        A binary 3D array where 1 represents the skeleton path.
+    """
+    # 1. Initialize empty dense matrix
+    dense_volume = np.zeros(target_shape, dtype=np.uint8)
+
+    # 2. Extract edge pairs from the sparse adjacency matrix
+    rows, cols = sparse.triu(adjacency_matrix).nonzero()
+
+    # 3. Rasterize edges and nodes into the grid
+    for u, v in zip(rows, cols):
+        p1 = X[u]
+        p2 = X[v]
+
+        # Calculate distance between vertices to determine how many samples to take
+        dist = np.linalg.norm(p1 - p2)
+        num_samples = max(int(np.ceil(dist * 2)), 2)  # Sample at sub-voxel resolution
+
+        # Linearly interpolate points between vertex u and vertex v
+        t = np.linspace(0, 1, num_samples)
+        line_points = p1[None, :] * (1 - t[:, None]) + p2[None, :] * t[:, None]
+
+        # Round coordinates to the nearest discrete voxel indices
+        voxels = np.round(line_points).astype(int)
+
+        # Clip indices to prevent out-of-bounds array crashing
+        voxels[:, 0] = np.clip(voxels[:, 0], 0, target_shape[0] - 1)
+        voxels[:, 1] = np.clip(voxels[:, 1], 0, target_shape[1] - 1)
+        voxels[:, 2] = np.clip(voxels[:, 2], 0, target_shape[2] - 1)
+
+        # Burn the line into our dense volume
+        dense_volume[voxels[:, 0], voxels[:, 1], voxels[:, 2]] = 1
+
+    return dense_volume
 
 
 def laplacian_skeletonisation(
     nifti_path,
-    output_path=None,
+    out_path=None,
     use_edt=True,
     use_anisotropic=True,
     beta_edt=1.0,
@@ -354,7 +414,7 @@ def laplacian_skeletonisation(
     ----------
     nifti_path : TYPE
         Description
-    output_path : None, optional
+    out_path : None, optional
         Description
     use_edt : bool, optional
         Description
@@ -370,8 +430,7 @@ def laplacian_skeletonisation(
         Description
     """
     print(f"Ingesting NIfTI image: {nifti_path}")
-    img = nib.load(nifti_path)
-    volume_data = img.get_fdata().astype(bool)
+    _, volume_data, img = io.load_nifti_get_mask(nifti_path, is_mask=True, ndim=3)
 
     vessel_voxels = np.argwhere(volume_data).astype(float)
     if len(vessel_voxels) == 0:
@@ -379,9 +438,7 @@ def laplacian_skeletonisation(
 
     # Downsample points cloud initialization limits if necessary to guard RAM bounds
     if downsample and len(vessel_voxels) > 200000:
-        print(
-            f"Volume contains {len(vessel_voxels)} points. Structuring node allocations..."
-        )
+        print(f"Volume contains {len(vessel_voxels)} points. Downsampling.")
         idx = np.random.choice(len(vessel_voxels), 150000, replace=False)
         X_init = vessel_voxels[idx]
     else:
@@ -390,7 +447,7 @@ def laplacian_skeletonisation(
     print("Computing proximity network coordinates...")
     dists = cdist(X_init, X_init)
     adj_matrix = (dists > 0) & (dists < 2.5)
-    adj_sparse = csr_matrix(adj_matrix)
+    adj_sparse = sparse.csr_matrix(adj_matrix)
 
     contracted_X, final_adj = laplacian_graph_contraction_edt(
         X_init,
@@ -403,9 +460,17 @@ def laplacian_skeletonisation(
         w_H_base=w_H_base,
     )
 
-    if output_path:
-        print(f"Saving structural centerline data matrices to: {output_path}")
-        np.savez(output_path, coordinates=contracted_X, adjacency=final_adj.toarray())
+    out_path = (
+        out_path
+        if out_path
+        else f"{os.path.splitext(os.path.splitext(nifti_path)[0])[0]}_skel"
+    )
+
+    print(f"Saving structural centerline data matrices to: {out_path}")
+    np.savez_compressed(f"{out_path}_coords.npz", contracted_X=contracted_X)
+    sparse.save_npz(f"{out_path}.npz", final_adj)
+    nifti_skel = graph_to_dense_3d(contracted_X, final_adj, volume_data.shape)
+    io.export_nifti(nifti_skel, img, f"{out_path}.nii.gz")
 
     return contracted_X, final_adj
 
