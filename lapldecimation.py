@@ -423,11 +423,11 @@ def laplacian_graph_contraction_edt(
 
         # 2. Extract localized retention matrix mapping
         max_pull = ""
-        ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
-        iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
-        iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
 
         if use_edt:
+            ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
+            iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
+            iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
             node_distances = edt_volume[ix, iy, iz]
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
             W_H_sq = sparse.diags(w_H_per_node**2, format="csr")
