@@ -269,7 +269,7 @@ def laplacian_graph_contraction_edt(
     max_iter=2000,
     tol=0.05,
     decimate_every=2,
-    min_edge_length=5,
+    min_edge_length=0.5,
     alpha_norm=1.5,
     alpha_tang=0.1,
 ):
@@ -316,7 +316,7 @@ def laplacian_graph_contraction_edt(
         an edge-collapse decimation execution. Default is 2.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo structural merging.
-        Default is 5.
+        Default is 0.5.
     alpha_norm : float, optional
         The normal/cross-sectional penalty parameter used during anisotropic calculation phases.
         Default is 1.5.
