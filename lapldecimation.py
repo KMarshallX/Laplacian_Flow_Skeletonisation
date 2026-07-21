@@ -490,15 +490,15 @@ def laplacian_graph_contraction_edt(
     return X, adj
 
 
-def coords_to_dense_3d(X, target_shape):
+def coords_to_dense_3d(X, volume_shape):
     """
-    Rasterizes an abstract graph topology into a dense 3D binary volume.
+    Create and fill in a volume using coordinates of points.
 
     Parameters
     ----------
     X : ndarray of shape (N, 3)
         The 3D coordinates of the areas with content.
-    target_shape : tuple of int (D, H, W)
+    volume_shape : tuple of int (D, H, W)
         The structural grid dimensions of the target 3D matrix.
 
     Returns
@@ -507,9 +507,13 @@ def coords_to_dense_3d(X, target_shape):
         A binary 3D array where 1 represents the skeleton path.
     """
     # 1. Initialize empty dense matrix
-    dense_volume = np.zeros(target_shape, dtype=bool)
+    dense_volume = np.zeros(volume_shape, dtype=bool)
 
     coords = np.rint(X).astype(np.int8)
+
+    # 2. Fix coordinates on boundaries due to numpy's round-to-even
+    for dim, bound in volume_shape:
+        coords[:, dim][coords[:, dim] == bound] = bound - 1
 
     # 3. Rasterize edges and nodes into the grid
     for i in coords:
