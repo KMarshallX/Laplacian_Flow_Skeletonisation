@@ -115,6 +115,21 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        "--separate_streams",
+        action="store_true",
+        help=(
+            "Separate segmentation components into individual labels using "
+            "scipy.ndimage.label and run contraction on each independently."
+        ),
+    )
+    optional.add_argument(
+        "--label_connectivity",
+        type=int,
+        choices=[6, 18, 26],
+        default=6,
+        help="Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].",
+    )
+    optional.add_argument(
         "--downsample",
         action="store_true",
         help="Downsample the original matrix to preserve RAM.",
@@ -516,6 +531,8 @@ def laplacian_skeletonisation(
     decimate_every=2,
     min_edge_length=0.5,
     downsample=False,
+    separate_streams=False,
+    label_connectivity=6,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -559,6 +576,10 @@ def laplacian_skeletonisation(
     downsample : bool, optional
         Flag setting whether point arrays containing high density are uniformly downsampled
         to stay within safe RAM footprints. Default is False.
+    separate_streams : bool, optional
+        Process each "independent" vessel by itself (i.e. non-connected segment)
+    label_connectivity : 6, 18, 26, optional
+        Connectivity profile to use to separate streams - 6, 18, or 26 edges.
 
     Returns
     -------
@@ -575,37 +596,87 @@ def laplacian_skeletonisation(
     print(f"Ingesting NIfTI image: {nifti_path}")
     _, volume_data, img = io.load_nifti_get_mask(nifti_path, is_mask=True, ndim=3)
 
-    vessel_voxels = np.argwhere(volume_data).astype(float)
-    if len(vessel_voxels) == 0:
+    if not np.any(volume_data):
         raise ValueError("Provided segmentation volume lacks any foreground structure.")
 
     # Downsample points cloud initialization limits if necessary to guard RAM bounds
-    if downsample and len(vessel_voxels) > 200000:
-        print(f"Volume contains {len(vessel_voxels)} points. Downsampling.")
-        idx = np.random.choice(len(vessel_voxels), 150000, replace=False)
-        X_init = vessel_voxels[idx]
+    if downsample and np.any(volume_data) > 200000:
+        print(f"Volume contains {np.any(volume_data)} points. Downsampling.")
+        vessel_voxels = np.argwhere(volume_data).astype(float)
+        rng = np.random.default_rng(seed=42)
+        idx = rng.choice(len(vessel_voxels), 150000, replace=False)
+        vessel_voxels = vessel_voxels[idx]
+        volume_data = coords_to_dense_3d(vessel_voxels, volume_data.shape)
+
+    # Process each component independently if separate_streams is True
+    if separate_streams:
+        CONN = {6: 1, 18: 2, 26: 3}
+        if label_connectivity not in CONN.keys():
+            raise ValueError(
+                f"Label connectivity {label_connectivity} is not a valid option [6, 18, 26]."
+            )
+
+        labeled_volume, num_features = ndimage.label(
+            volume_data,
+            structure=ndimage.generate_binary_structure(3, CONN[label_connectivity]),
+        )
+        print(
+            f"Divided volume into {num_features} distinct label components "
+            f"({label_connectivity}-connectivity)."
+        )
     else:
-        X_init = vessel_voxels
+        labeled_volume, num_features = volume_data * 1, 1
 
-    print("Computing proximity network coordinates...")
-    dists = cdist(X_init, X_init)
-    adj_matrix = (dists > 0) & (dists < 2.5)
-    adj_sparse = sparse.csr_matrix(adj_matrix)
+    contracted_X_list = []
+    adj_list = []
 
-    contracted_X, final_adj = laplacian_graph_contraction_edt(
-        X_init,
-        adj_sparse,
-        binary_segmentation=volume_data,
-        use_edt=use_edt,
-        use_anisotropic=use_anisotropic,
-        enforce_containment=enforce_containment,
-        beta_edt=beta_edt,
-        w_L=w_L,
-        w_H_base=w_H_base,
-        tol=tol,
-        decimate_every=decimate_every,
-        min_edge_length=min_edge_length,
-    )
+    for label_id in range(1, num_features + 1):
+        X_init = np.argwhere(labeled_volume == label_id).astype(float)
+
+        # Skip small noise components
+        if len(X_init) < 3:
+            dists = cdist(X_init, X_init)
+            adj_matrix = (dists > 0) & (dists < 2.5)
+            adj_list.append(sparse.csr_matrix(adj_matrix))
+            contracted_X_list.append(X_init)
+
+            continue
+
+        if separate_streams:
+            print(
+                f"\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---"
+            )
+
+        print("Computing proximity network coordinates...")
+        dists = cdist(X_init, X_init)
+        adj_matrix = (dists > 0) & (dists < 2.5)
+        adj_sparse = sparse.csr_matrix(adj_matrix)
+
+        # Run contraction on this label's component mask
+        contracted_X, final_adj = laplacian_graph_contraction_edt(
+            X_init,
+            adj_sparse,
+            binary_segmentation=X_init,
+            use_edt=use_edt,
+            use_anisotropic=use_anisotropic,
+            enforce_containment=enforce_containment,
+            beta_edt=beta_edt,
+            w_L=w_L,
+            w_H_base=w_H_base,
+            tol=tol,
+            decimate_every=decimate_every,
+            min_edge_length=min_edge_length,
+        )
+
+        contracted_X_list.append(contracted_X)
+        adj_list.append(final_adj)
+
+    if not contracted_X_list:
+        raise ValueError("No valid components found for contraction.")
+
+    # Merge coordinates and sparse block-diagonal adjacency matrices across all labels
+    contracted_X = np.vstack(contracted_X_list)
+    final_adj = sparse.block_diag(adj_list, format="csr")
 
     out_path = (
         out_path
@@ -613,7 +684,7 @@ def laplacian_skeletonisation(
         else f"{os.path.splitext(os.path.splitext(nifti_path)[0])[0]}_skel"
     )
 
-    print(f"Saving structural centerline data matrices to: {out_path}")
+    print(f"\nSaving structural centerline data matrices to: {out_path}")
     np.savez_compressed(f"{out_path}_coords.npz", contracted_X=contracted_X)
     sparse.save_npz(f"{out_path}.npz", final_adj)
     nifti_skel = coords_to_dense_3d(contracted_X, volume_data.shape)
