@@ -475,57 +475,6 @@ def laplacian_graph_contraction_edt(
     return X, adj
 
 
-def graph_to_dense_3d(X, adjacency_matrix, target_shape):
-    """
-    Rasterizes an abstract graph topology into a dense 3D binary volume.
-
-    Parameters
-    ----------
-    X : ndarray of shape (N, 3)
-        The 3D coordinates of the vertices/nodes.
-    adjacency_matrix : csr_matrix of shape (N, N)
-        The sparse connectivity matrix representing edges.
-    target_shape : tuple of int (D, H, W)
-        The structural grid dimensions of the target 3D matrix.
-
-    Returns
-    -------
-    dense_volume : ndarray of shape (D, H, W)
-        A binary 3D array where 1 represents the skeleton path.
-    """
-    # 1. Initialize empty dense matrix
-    dense_volume = np.zeros(target_shape, dtype=np.uint8)
-
-    # 2. Extract edge pairs from the sparse adjacency matrix
-    rows, cols = sparse.triu(adjacency_matrix).nonzero()
-
-    # 3. Rasterize edges and nodes into the grid
-    for u, v in zip(rows, cols):
-        p1 = X[u]
-        p2 = X[v]
-
-        # Calculate distance between vertices to determine how many samples to take
-        dist = np.linalg.norm(p1 - p2)
-        num_samples = max(int(np.ceil(dist * 2)), 2)  # Sample at sub-voxel resolution
-
-        # Linearly interpolate points between vertex u and vertex v
-        t = np.linspace(0, 1, num_samples)
-        line_points = p1[None, :] * (1 - t[:, None]) + p2[None, :] * t[:, None]
-
-        # Round coordinates to the nearest discrete voxel indices
-        voxels = np.round(line_points).astype(int)
-
-        # Clip indices to prevent out-of-bounds array crashing
-        voxels[:, 0] = np.clip(voxels[:, 0], 0, target_shape[0] - 1)
-        voxels[:, 1] = np.clip(voxels[:, 1], 0, target_shape[1] - 1)
-        voxels[:, 2] = np.clip(voxels[:, 2], 0, target_shape[2] - 1)
-
-        # Burn the line into our dense volume
-        dense_volume[voxels[:, 0], voxels[:, 1], voxels[:, 2]] = 1
-
-    return dense_volume
-
-
 def coords_to_dense_3d(X, target_shape):
     """
     Rasterizes an abstract graph topology into a dense 3D binary volume.
