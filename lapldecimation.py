@@ -631,7 +631,8 @@ def laplacian_skeletonisation(
     adj_list = []
 
     for label_id in range(1, num_features + 1):
-        X_init = np.argwhere(labeled_volume == label_id).astype(float)
+        segment = labeled_volume == label_id
+        X_init = np.argwhere(segment).astype(float)
 
         # Skip small noise components
         if len(X_init) < 3:
@@ -656,7 +657,7 @@ def laplacian_skeletonisation(
         contracted_X, final_adj = laplacian_graph_contraction_edt(
             X_init,
             adj_sparse,
-            binary_segmentation=X_init,
+            binary_segmentation=segment,
             use_edt=use_edt,
             use_anisotropic=use_anisotropic,
             enforce_containment=enforce_containment,
