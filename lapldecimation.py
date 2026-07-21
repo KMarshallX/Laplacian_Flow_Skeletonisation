@@ -379,9 +379,18 @@ def laplacian_graph_contraction_edt(
         use_edt = False
         enforce_containment = False
 
+    edt_string = f" beta_edt (EDT scale factor)={beta_edt}," if use_edt else ""
+
     print(
-        f"Starting contraction [Anisotropic={use_anisotropic}, EDT={use_edt}, Hard-Containment={enforce_containment}] "
-        f"with {X.shape[0]} nodes..."
+        f"Starting contraction with {X.shape[0]} nodes \n\n"
+        f"Params:\n"
+        f" - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},\n"
+        f" -{edt_string} min_edge_length (decimation grid)={min_edge_length}\n\n"
+        f"Options:\n"
+        f" - Anisotropic={use_anisotropic}\n"
+        f" - EDT={use_edt}\n"
+        f" - Hard Containment={enforce_containment}\n"
+        f" - Decimation step={decimate_every}\n"
     )
 
     for i in range(max_iter):
@@ -659,9 +668,14 @@ def laplacian_skeletonisation(
     np.savez_compressed(f"{out_path}_coords.npz", contracted_X=contracted_X)
     sparse.save_npz(f"{out_path}.npz", final_adj)
     nifti_skel = coords_to_dense_3d(contracted_X, volume_data.shape)
+
+    # If enforce containment was used, assume no loss of tracts masking with original segmentation.
+    if enforce_containment:
+        nifti_skel = nifti_skel * volume_data
+
     io.export_nifti(nifti_skel, img, f"{out_path}.nii.gz")
 
-    return contracted_X, final_adj
+    return contracted_X, final_adj, nifti_skel
 
 
 def _main(argv=None):
