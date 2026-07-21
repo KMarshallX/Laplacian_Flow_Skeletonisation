@@ -5,10 +5,11 @@ import os
 import sys
 
 import numpy as np
-from nigsp import io
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
 from scipy.spatial.distance import cdist
+
+from nigsp import io
 
 
 def _get_parser():
@@ -615,7 +616,7 @@ def laplacian_skeletonisation(
     # Process each component independently if separate_streams is True
     if separate_streams:
         CONN = {6: 1, 18: 2, 26: 3}
-        if label_connectivity not in CONN.keys():
+        if label_connectivity not in CONN:
             raise ValueError(
                 f"Label connectivity {label_connectivity} is not a valid option [6, 18, 26]."
             )

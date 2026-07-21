@@ -1,3 +1,23 @@
+[tool.coverage.report]
+exclude_lines = [
+  'if __name__ == .__main__.:',
+  'if TYPE_CHECKING:',
+  'pragma: no cover',
+]
+precision = 2
+
+[tool.coverage.run]
+branch = true
+cover_pylib = false
+omit = [
+  '**/__init__.py',
+  '**/conftest.py',
+  '**/laplskel/_version.py',
+  '**/laplskel/cli/*',
+  '**/laplskel/due.py',
+  '**/tests/**',
+]
+
 [tool.ruff]
 extend-exclude = ['docs', 'versioneer.py', 'setup.py']
 line-length = 88
@@ -6,6 +26,7 @@ target-version = 'py38'
 [tool.ruff.format]
 docstring-code-format = true
 line-ending = 'lf'
+quote-style = "single"
 
 [tool.ruff.lint]
 ignore = []
@@ -25,9 +46,9 @@ convention = 'numpy'
 '*.pyi' = ['E501']
 '__init__.py' = ['F401']
 '_version.py' = ['UP031']
-'nigsp/tests/*' = ['D']
-'nigsp/__init__.py' = ['F401', 'D']
-'nigsp/*/__init__.py' = ['F401', 'D']
-'nigsp/_version.py' = ['UP031', 'D']
-'nigsp/conftest.py' = ['D']
-'nigsp/due.py' = ['D']
+'laplskel/tests/*' = ['D']
+'laplskel/__init__.py' = ['F401', 'D']
+'laplskel/*/__init__.py' = ['F401', 'D']
+'laplskel/_version.py' = ['UP031', 'D']
+'laplskel/conftest.py' = ['D']
+'laplskel/due.py' = ['D']
