@@ -91,11 +91,28 @@ def _get_parser():
         help="Baseline structural anchor retention weight variable.",
     )
     optional.add_argument(
+        "--tol",
+        type=float,
+        default=0.05,
+        help="Convergence tolerance limit evaluated against mean vertex displacement.",
+    )
+    optional.add_argument(
         "--decimate_every",
         dest="decimate_every",
         type=int,
         default=2,
         help="Decimate nodes every N steps [Default=2].",
+    )
+    optional.add_argument(
+        "--dec_grid_size",
+        dest="min_edge_length",
+        type=float,
+        default=0.5,
+        help=(
+            "The Euclidean spatial threshold criteria below which two connected nodes "
+            "undergo structural merging, i.e. the isotropic voxel size of the grid used"
+            " for decimation."
+        ),
     )
     optional.add_argument(
         "--downsample",
@@ -537,7 +554,9 @@ def laplacian_skeletonisation(
     beta_edt=1.0,
     w_L=0.5,
     w_H_base=0.5,
+    tol=0.05,
     decimate_every=2,
+    min_edge_length=0.5,
     downsample=False,
 ):
     """
@@ -554,20 +573,31 @@ def laplacian_skeletonisation(
         Enables boundary tracking potential constraints using Euclidean Distance Transforms.
         Default is True.
     use_anisotropic : bool, optional
-        Enables anisotropic geometry handling to penalize internal longitudinal shortening vectors.
-        Default is True.
+        Enables anisotropic geometry handling to penalize internal longitudinal
+        shortening vectors. Default is True.
     enforce_containment : bool, optional
         If True, applies a hard projection constraint to force nodes drifting out of the
-        foreground mask onto the closest inner boundary shell surface voxel. Default is False.
+        foreground mask onto the closest inner boundary shell surface voxel.
+        Default is False.
     beta_edt : float, optional
-        Scaling modulation weight assigned to boundary energy calculation properties. Default is 1.0.
+        Scaling modulation weight assigned to boundary energy calculation properties.
+        Default is 1.0.
     w_L : float, optional
-        Contraction weight step modifier targeting structural local geometric collapse. Default is 0.5.
+        Contraction weight step modifier targeting structural local geometric collapse.
+        This should be alpha in Damseh 2021. Default is 0.5.
     w_H_base : float, optional
-        Baseline structural node anchor positional persistence value metric. Default is 0.5.
+        Baseline structural node anchor positional persistence value metric.
+        This should be equivalent to beta in Damseh 2021. Default is 0.5.
+    tol : float, optional
+        Convergence tolerance limit evaluated against mean vertex displacement.
+        This should be the equivalent of gamma in Damseh 2021 (not sure). Default is 0.05.
     decimate_every : int, optional
-        Sampling cadence sequence gap length setting how frequently graph e-collapses execute.
-        Default is 2.
+        Frequency cadence interval defining how many contraction loop steps occur before
+        triggering an edge-collapse decimation execution. Default is 2.
+    min_edge_length : float, optional
+        The Euclidean spatial threshold criteria below which two connected nodes undergo
+        structural merging, i.e. the isotropic voxel size of the grid used for
+        decimation. Default is 0.5.
     downsample : bool, optional
         Flag setting whether point arrays containing high density are uniformly downsampled
         to stay within safe RAM footprints. Default is False.
@@ -614,7 +644,9 @@ def laplacian_skeletonisation(
         beta_edt=beta_edt,
         w_L=w_L,
         w_H_base=w_H_base,
+        tol=tol,
         decimate_every=decimate_every,
+        min_edge_length=min_edge_length,
     )
 
     out_path = (
