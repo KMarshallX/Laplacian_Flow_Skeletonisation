@@ -61,6 +61,14 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        "--enforce_containment",
+        action="store_true",
+        help=(
+            "Apply a hard projection constraint to force nodes drifting out of the "
+            "foreground mask onto the closest inner boundary shell surface voxel."
+        ),
+    )
+    optional.add_argument(
         "--beta_edt",
         type=float,
         default=1.0,
@@ -525,6 +533,7 @@ def laplacian_skeletonisation(
     out_path=None,
     use_edt=True,
     use_anisotropic=True,
+    enforce_containment=False,
     beta_edt=1.0,
     w_L=0.5,
     w_H_base=0.5,
@@ -547,6 +556,9 @@ def laplacian_skeletonisation(
     use_anisotropic : bool, optional
         Enables anisotropic geometry handling to penalize internal longitudinal shortening vectors.
         Default is True.
+    enforce_containment : bool, optional
+        If True, applies a hard projection constraint to force nodes drifting out of the
+        foreground mask onto the closest inner boundary shell surface voxel. Default is False.
     beta_edt : float, optional
         Scaling modulation weight assigned to boundary energy calculation properties. Default is 1.0.
     w_L : float, optional
@@ -598,6 +610,7 @@ def laplacian_skeletonisation(
         binary_segmentation=volume_data,
         use_edt=use_edt,
         use_anisotropic=use_anisotropic,
+        enforce_containment=enforce_containment,
         beta_edt=beta_edt,
         w_L=w_L,
         w_H_base=w_H_base,
