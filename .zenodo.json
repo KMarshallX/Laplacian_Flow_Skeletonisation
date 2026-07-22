@@ -1,28 +1,12 @@
 {
     "license":"Apache-2.0",
-    "title":"NiGSP: A python library (and toolbox!) to run Graph Signal Processing on multimodal MRI data.",
+    "title":"Laplskel: An attempt to render in a function-oriented library Damseh 2021's algorithm - plus some more.",
     "upload_type":"software",
     "creators":[
         {
             "orcid":"0000-0002-2553-3327",
-            "affiliation":"Medical Imaging Processing Lab, Center for Neuroprosthetics, École Polytechnique Fédérale de Lausanne",
+            "affiliation":"Faculty of Psychology and Neuroscience, Maastricht University",
             "name":"Stefano Moia"
-        },
-        {
-            "affiliation":"Medical Imaging Processing Lab, Center for Neuroprosthetics, École Polytechnique Fédérale de Lausanne",
-            "name": "Nawal Kinani"
-        },
-        {
-            "affiliation":"Medical Imaging Processing Lab, Center for Neuroprosthetics, École Polytechnique Fédérale de Lausanne",
-            "name": "Mathieu Scheltienne"
-        },
-        {
-            "affiliation":"Medical Imaging Processing Lab, Center for Neuroprosthetics, École Polytechnique Fédérale de Lausanne",
-            "name": "Maria Giulia Preti"
-        },
-        {
-            "affiliation":"Medical Imaging Processing Lab, Center for Neuroprosthetics, École Polytechnique Fédérale de Lausanne",
-            "name": "Dimitri Van De Ville"
         }
     ],
     "access_right":"open"
