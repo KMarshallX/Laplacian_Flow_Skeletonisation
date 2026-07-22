@@ -1,0 +1,15 @@
+{
+  "projectName": "Laplacian_Flow_Segmentation",
+  "projectOwner": "smoia",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": true,
+  "commitConvention": "none",
+  "contributors": [],
+  "contributorsPerLine": 7,
+  "linkToUsage": true
+}
