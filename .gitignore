@@ -136,3 +136,7 @@ dmypy.json
 
 # macOS
 .DS_Store
+
+AGENTS.md
+LOG.md
+laplskel/tests/*

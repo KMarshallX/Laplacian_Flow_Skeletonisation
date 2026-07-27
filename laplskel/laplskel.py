@@ -7,9 +7,24 @@ import sys
 import numpy as np
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
-from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
 
 from nigsp import io
+
+
+VALID_CONNECTIVITIES = (6, 18, 26)
+
+
+def _positive_finite_float(value):
+    """Parse a finite, strictly positive floating-point command-line value."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a floating-point number")
+
+    if not np.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be finite and strictly positive")
+    return parsed
 
 
 def _get_parser():
@@ -126,9 +141,22 @@ def _get_parser():
     optional.add_argument(
         "--label_connectivity",
         type=int,
-        choices=[6, 18, 26],
+        choices=VALID_CONNECTIVITIES,
         default=6,
         help="Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].",
+    )
+    optional.add_argument(
+        "--initial_connectivity",
+        type=int,
+        choices=VALID_CONNECTIVITIES,
+        default=26,
+        help="Voxel connectivity for the initial graph (6, 18, or 26) [Default=26].",
+    )
+    optional.add_argument(
+        "--pca_radius",
+        type=_positive_finite_float,
+        default=2.5,
+        help="Spatial radius used for local PCA tangent estimation [Default=2.5].",
     )
     optional.add_argument(
         "--downsample",
@@ -141,8 +169,150 @@ def _get_parser():
     return parser
 
 
+def _validate_initial_connectivity(initial_connectivity):
+    """Validate and normalize an initial voxel-graph connectivity value."""
+    if (
+        isinstance(initial_connectivity, (bool, np.bool_))
+        or initial_connectivity not in VALID_CONNECTIVITIES
+    ):
+        raise ValueError(
+            f"Initial connectivity {initial_connectivity} is not a valid option "
+            f"{list(VALID_CONNECTIVITIES)}."
+        )
+    return int(initial_connectivity)
+
+
+def _validate_pca_radius(pca_radius):
+    """Validate and normalize the PCA neighbourhood radius."""
+    if isinstance(pca_radius, (bool, np.bool_)) or not np.isscalar(pca_radius):
+        raise ValueError("pca_radius must be finite and strictly positive.")
+    try:
+        pca_radius = float(pca_radius)
+    except (TypeError, ValueError):
+        raise ValueError("pca_radius must be finite and strictly positive.")
+    if not np.isfinite(pca_radius) or pca_radius <= 0:
+        raise ValueError("pca_radius must be finite and strictly positive.")
+    return pca_radius
+
+
+def _build_initial_adjacency(X, initial_connectivity):
+    """Build a sparse voxel graph with the requested 3D connectivity."""
+    initial_connectivity = _validate_initial_connectivity(initial_connectivity)
+    max_squared_distance = {6: 1, 18: 2, 26: 3}[initial_connectivity]
+
+    coordinate_to_index = {tuple(coordinate): i for i, coordinate in enumerate(X)}
+    offsets = []
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                squared_distance = dx * dx + dy * dy + dz * dz
+                if not 0 < squared_distance <= max_squared_distance:
+                    continue
+                # Retain one orientation for each undirected voxel pair.
+                if (dx, dy, dz) > (0, 0, 0):
+                    offsets.append((dx, dy, dz))
+
+    rows = []
+    cols = []
+    for i, coordinate in enumerate(X):
+        for offset in offsets:
+            neighbour = tuple(coordinate + offset)
+            j = coordinate_to_index.get(neighbour)
+            if j is not None:
+                rows.extend((i, j))
+                cols.extend((j, i))
+
+    data = np.ones(len(rows), dtype=bool)
+    return sparse.csr_matrix(
+        (data, (rows, cols)), shape=(X.shape[0], X.shape[0]), dtype=bool
+    )
+
+
+def _principal_tangent(samples):
+    """Return the principal axis of samples, or None for degenerate samples."""
+    if samples.shape[0] < 2:
+        return None
+
+    centered = samples - samples.mean(axis=0)
+    covariance = centered.T @ centered
+    if not np.all(np.isfinite(covariance)) or not np.any(covariance):
+        return None
+
+    try:
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    except np.linalg.LinAlgError:
+        return None
+    if eigenvalues[-1] <= np.finfo(float).eps:
+        return None
+
+    tangent = eigenvectors[:, -1]
+    norm = np.linalg.norm(tangent)
+    if not np.isfinite(norm) or norm <= np.finfo(float).eps:
+        return None
+    return tangent / norm
+
+
+def _graph_fallback_tangent(X, adjacency_matrix, node):
+    """Estimate a first-iteration tangent from graph-adjacent nodes."""
+    neighbours = adjacency_matrix.getrow(node).indices
+    neighbours = neighbours[neighbours != node]
+    tangent = _principal_tangent(X[neighbours])
+    if tangent is not None:
+        return tangent
+
+    if neighbours.size == 1:
+        direction = X[neighbours[0]] - X[node]
+        norm = np.linalg.norm(direction)
+        if np.isfinite(norm) and norm > np.finfo(float).eps:
+            return direction / norm
+    return np.zeros(3, dtype=float)
+
+
+def _estimate_local_tangents(
+    X, adjacency_matrix, pca_radius, previous_tangents=None
+):
+    """Estimate tangents using radius queries on the current coordinates."""
+    pca_radius = _validate_pca_radius(pca_radius)
+    if previous_tangents is not None and previous_tangents.shape != X.shape:
+        raise ValueError("previous_tangents must have the same shape as X.")
+
+    # Coordinates contract on every solver step, so this tree must not be reused
+    # between calls.
+    tree = cKDTree(X)
+    radius_neighbours = tree.query_ball_point(X, r=pca_radius)
+    tangents = np.zeros_like(X, dtype=float)
+
+    for node, neighbours in enumerate(radius_neighbours):
+        # PCA samples are neighbouring points only; never include the query node.
+        neighbours = np.asarray(
+            [neighbour for neighbour in neighbours if neighbour != node], dtype=int
+        )
+        tangent = _principal_tangent(X[neighbours])
+
+        if tangent is None:
+            if previous_tangents is None:
+                tangent = _graph_fallback_tangent(X, adjacency_matrix, node)
+            else:
+                tangent = previous_tangents[node].copy()
+
+        if previous_tangents is not None and np.dot(
+            tangent, previous_tangents[node]
+        ) < 0:
+            tangent = -tangent
+        tangents[node] = tangent
+
+    return tangents
+
+
 def compute_laplacian_matrix(
-    X, adjacency_matrix, use_anisotropic=True, alpha_norm=1.5, alpha_tang=0.1
+    X,
+    adjacency_matrix,
+    use_anisotropic=True,
+    alpha_norm=1.5,
+    alpha_tang=0.1,
+    pca_radius=2.5,
+    previous_tangents=None,
+    return_tangents=False,
 ):
     """
     Compute the Graph Laplacian Matrix L = D - W.
@@ -171,13 +341,27 @@ def compute_laplacian_matrix(
     alpha_tang : float, optional
         The scaling coefficient penalty assigned to tangential (longitudinal direction)
         displacement components when `use_anisotropic` is active. Default is 0.1.
+    pca_radius : float, optional
+        Finite, strictly positive spatial radius used to select local PCA samples.
+        Default is 2.5.
+    previous_tangents : numpy.ndarray, optional
+        An (N, 3) array of tangents from the preceding contraction iteration, used
+        when a node has insufficient or degenerate PCA samples. On the first
+        iteration, graph-adjacent neighbours are used instead. Default is None.
+    return_tangents : bool, optional
+        If True, return the estimated tangent array alongside the Laplacian.
+        Default is False.
 
     Returns
     -------
     L : scipy.sparse.csr_matrix
         The calculated sparse Graph Laplacian Matrix of shape (N, N) governed
         by the equation L = D - W.
+    tangents : numpy.ndarray, optional
+        The (N, 3) tangent array, returned with `L` only when
+        `return_tangents=True`.
     """
+    pca_radius = _validate_pca_radius(pca_radius)
     n_vertices = X.shape[0]
 
     # Get row and col indices from the sparse adjacency matrix
@@ -189,16 +373,12 @@ def compute_laplacian_matrix(
     distances = np.maximum(distances, 1e-6)  # Prevent division by zero
 
     if use_anisotropic:
-        # Estimate local structural tangents using local neighborhood PCA proxy
-        tangents = np.zeros_like(X)
-        for i in range(n_vertices):
-            neighbors = cols[rows == i]
-            if len(neighbors) > 1:
-                cov = np.cov(X[neighbors].T)
-                eigvals, eigvecs = np.linalg.eigh(cov)
-                tangents[i] = eigvecs[:, -1]  # Principal directional eigenvector
-            else:
-                tangents[i] = np.array([1.0, 0.0, 0.0])
+        tangents = _estimate_local_tangents(
+            X,
+            adjacency_matrix,
+            pca_radius,
+            previous_tangents=previous_tangents,
+        )
 
         t_i = tangents[rows]
         dot_products = np.sum(diffs * t_i, axis=1)
@@ -224,10 +404,17 @@ def compute_laplacian_matrix(
         shape=(n_vertices, n_vertices),
     )
 
-    return D - W
+    laplacian = D - W
+    if return_tangents:
+        if not use_anisotropic:
+            tangents = previous_tangents
+        return laplacian, tangents
+    return laplacian
 
 
-def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
+def edge_collapse_decimation(
+    X, adjacency_matrix, min_edge_length, return_retained_indices=False
+):
     """
     Perform structural decimation (E-collapse).
 
@@ -245,6 +432,9 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     min_edge_length : float
         The structural distance threshold. Any edge with a Euclidean length shorter
         than this value will be collapsed.
+    return_retained_indices : bool, optional
+        If True, also return the original indices retained by decimation.
+        Default is False.
 
     Returns
     -------
@@ -254,6 +444,9 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     new_adj : scipy.sparse.csr_matrix
         A simplified sparse CSR adjacency matrix of shape (M, M) with self-loops
         and duplicate edges removed.
+    unique_verts : numpy.ndarray, optional
+        Original indices corresponding to the retained vertices, returned only
+        when `return_retained_indices=True`.
     """
     n_vertices = X.shape[0]
     rows, cols = adjacency_matrix.nonzero()
@@ -293,6 +486,8 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
         (new_data, (new_rows, new_cols)), shape=(len(unique_verts), len(unique_verts))
     )
 
+    if return_retained_indices:
+        return new_X, new_adj, unique_verts
     return new_X, new_adj
 
 
@@ -313,6 +508,7 @@ def laplacian_graph_contraction_edt(
     min_edge_length=0.5,
     alpha_norm=1.5,
     alpha_tang=0.1,
+    pca_radius=2.5,
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -364,6 +560,9 @@ def laplacian_graph_contraction_edt(
     alpha_tang : float, optional
         The tangential/longitudinal orientation penalty parameter used during anisotropic calculation phases.
         Default is 0.1.
+    pca_radius : float, optional
+        Finite, strictly positive spatial radius used to select local PCA tangent
+        samples. Default is 2.5.
 
     Returns
     -------
@@ -372,8 +571,10 @@ def laplacian_graph_contraction_edt(
     adj : scipy.sparse.csr_matrix
         Decimated skeleton topology graph connectivity representation of shape (M, M).
     """
+    pca_radius = _validate_pca_radius(pca_radius)
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
+    previous_tangents = None
 
     # Conditional 3D EDT & Hard-Voxel Constraint Lookup Precomputation
     edt_volume = None
@@ -413,12 +614,15 @@ def laplacian_graph_contraction_edt(
         n_vertices = X.shape[0]
 
         # 1. Compute chosen Laplacian variant
-        L = compute_laplacian_matrix(
+        L, current_tangents = compute_laplacian_matrix(
             X,
             adj,
             use_anisotropic=use_anisotropic,
             alpha_norm=alpha_norm,
             alpha_tang=alpha_tang,
+            pca_radius=pca_radius,
+            previous_tangents=previous_tangents,
+            return_tangents=True,
         )
         L_squared = L.dot(L)
 
@@ -475,6 +679,7 @@ def laplacian_graph_contraction_edt(
 
         displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
         X = X_next
+        previous_tangents = current_tangents
 
         print(
             f"Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - "
@@ -486,7 +691,14 @@ def laplacian_graph_contraction_edt(
             break
 
         if (i + 1) % decimate_every == 0:
-            X, adj = edge_collapse_decimation(X, adj, min_edge_length)
+            X, adj, retained_indices = edge_collapse_decimation(
+                X,
+                adj,
+                min_edge_length,
+                return_retained_indices=True,
+            )
+            if previous_tangents is not None:
+                previous_tangents = previous_tangents[retained_indices]
 
     return X, adj
 
@@ -538,6 +750,8 @@ def laplacian_skeletonisation(
     downsample=False,
     separate_streams=False,
     label_connectivity=6,
+    initial_connectivity=26,
+    pca_radius=2.5,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -585,6 +799,11 @@ def laplacian_skeletonisation(
         Process each "independent" vessel by itself (i.e. non-connected segment)
     label_connectivity : 6, 18, 26, optional
         Connectivity profile to use to separate streams - 6, 18, or 26 edges.
+    initial_connectivity : 6, 18, 26, optional
+        Voxel connectivity used to build the initial foreground graph. Default is 26.
+    pca_radius : float, optional
+        Finite, strictly positive spatial radius used to select local PCA tangent
+        samples. Default is 2.5.
 
     Returns
     -------
@@ -598,6 +817,9 @@ def laplacian_skeletonisation(
     ValueError
         If the loaded structural NIfTI mask image is completely empty or lacks foreground elements.
     """
+    initial_connectivity = _validate_initial_connectivity(initial_connectivity)
+    pca_radius = _validate_pca_radius(pca_radius)
+
     print(f"Ingesting NIfTI image: {nifti_path}")
     _, volume_data, img = io.load_nifti_get_mask(nifti_path, is_mask=True, ndim=3)
 
@@ -641,9 +863,9 @@ def laplacian_skeletonisation(
 
         # Skip small noise components
         if len(X_init) < 3:
-            dists = cdist(X_init, X_init)
-            adj_matrix = (dists > 0) & (dists < 2.5)
-            adj_list.append(sparse.csr_matrix(adj_matrix))
+            adj_list.append(
+                _build_initial_adjacency(X_init, initial_connectivity)
+            )
             contracted_X_list.append(X_init)
 
             continue
@@ -654,9 +876,7 @@ def laplacian_skeletonisation(
             )
 
         print("Computing proximity network coordinates...")
-        dists = cdist(X_init, X_init)
-        adj_matrix = (dists > 0) & (dists < 2.5)
-        adj_sparse = sparse.csr_matrix(adj_matrix)
+        adj_sparse = _build_initial_adjacency(X_init, initial_connectivity)
 
         # Run contraction on this label's component mask
         contracted_X, final_adj = laplacian_graph_contraction_edt(
@@ -672,6 +892,7 @@ def laplacian_skeletonisation(
             tol=tol,
             decimate_every=decimate_every,
             min_edge_length=min_edge_length,
+            pca_radius=pca_radius,
         )
 
         contracted_X_list.append(contracted_X)
