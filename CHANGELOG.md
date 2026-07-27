@@ -1,3 +1,15 @@
+# 0.2.1 (Mon Jul 27 2026)
+
+#### 🐛 Bug Fix
+
+- fix: Fix dependencies ([@smoia](https://github.com/smoia))
+
+#### Authors: 1
+
+- Stefano Moia ([@smoia](https://github.com/smoia))
+
+---
+
 # 0.2.0 (Mon Jul 27 2026)
 
 #### 🚀 Enhancement
