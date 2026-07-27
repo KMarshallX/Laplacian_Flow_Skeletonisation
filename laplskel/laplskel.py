@@ -5,11 +5,12 @@ import os
 import sys
 
 import numpy as np
-from joblib import Parallel, delayed
+from joblib import delayed
 from nigsp import io
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
 from scipy.spatial.distance import cdist
+from tqdm_joblib import ParallelPbar
 
 
 def _get_parser():
@@ -769,7 +770,7 @@ def laplacian_skeletonisation(
         f'on {total_cores} CPU cores detected.'
     )
 
-    results = Parallel(n_jobs=n_workers)(
+    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(
         delayed(_process_single_label)(
             label_id,
             labeled_volume,
