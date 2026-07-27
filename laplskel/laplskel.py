@@ -789,17 +789,12 @@ def laplacian_skeletonisation(
 
     print('Reuniting results from parallel jobs.')
 
-    results.sort(key=lambda x: x[0])
-
-    contracted_X_list = [res[1] for res in results]
-    adj_list = [res[2] for res in results]
-
-    if not contracted_X_list:
+    if not results:
         raise ValueError('No valid components found for contraction.')
 
     # Merge coordinates and sparse block-diagonal adjacency matrices across all labels
-    contracted_X = np.vstack(contracted_X_list)
-    final_adj = sparse.block_diag(adj_list, format='csr')
+    contracted_X = np.vstack([res[1] for res in results])
+    final_adj = sparse.block_diag([res[2] for res in results], format='csr')
 
     out_path = (
         out_path
