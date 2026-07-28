@@ -5,11 +5,15 @@ import os
 import sys
 
 import numpy as np
+from joblib import delayed
+from nigsp import io
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
 
 from nigsp import io
+from scipy.spatial.distance import cdist
+from tqdm_joblib import ParallelPbar
 
 
 VALID_CONNECTIVITIES = (6, 18, 26)
@@ -37,113 +41,113 @@ def _get_parser():
 
     """
     parser = argparse.ArgumentParser(
-        description="Configurable EDT-Guided Laplacian Graph Contraction Pipeline.",
+        description='Configurable EDT-Guided Laplacian Graph Contraction Pipeline.',
         add_help=False,
     )
 
-    required = parser.add_argument_group("Required Arguments")
+    required = parser.add_argument_group('Required Arguments')
     required.add_argument(
-        "--input",
-        "-i",
-        dest="nifti_path",
+        '--input',
+        '-i',
+        dest='nifti_path',
         type=str,
         required=True,
-        help="Path pointing toward the input .nii or .nii.gz file volume.",
+        help='Path pointing toward the input .nii or .nii.gz file volume.',
     )
 
-    optional = parser.add_argument_group("Other Optional Arguments")
+    optional = parser.add_argument_group('Other Optional Arguments')
     optional.add_argument(
-        "--output",
-        "-o",
-        dest="out_path",
+        '--output',
+        '-o',
+        dest='out_path',
         type=str,
         default=None,
-        help="Path destination for the generated skeleton arrays.",
+        help='Path destination for the generated skeleton arrays.',
     )
     optional.add_argument(
-        "--use_edt",
-        action="store_true",
+        '--use_edt',
+        action='store_true',
         help=(
-            "Use distance transform potential constraints on top of classic uniform "
-            "retention mapping."
+            'Use distance transform potential constraints on top of classic uniform '
+            'retention mapping.'
         ),
     )
     optional.add_argument(
-        "--use_anisotropic",
-        action="store_true",
+        '--use_anisotropic',
+        action='store_true',
         help=(
-            "Flag to disable anisotropic constraints and fall back to standard "
-            "isotropic Laplacian matrix operations."
+            'Flag to disable anisotropic constraints and fall back to standard '
+            'isotropic Laplacian matrix operations.'
         ),
     )
     optional.add_argument(
-        "--enforce_containment",
-        action="store_true",
+        '--enforce_containment',
+        action='store_true',
         help=(
-            "Apply a hard projection constraint to force nodes drifting out of the "
-            "foreground mask onto the closest inner boundary shell surface voxel."
+            'Apply a hard projection constraint to force nodes drifting out of the '
+            'foreground mask onto the closest inner boundary shell surface voxel.'
         ),
     )
     optional.add_argument(
-        "--beta_edt",
+        '--beta_edt',
         type=float,
         default=1.0,
         help=(
-            "Custom scaling weight assigned to modulate the EDT boundary energy "
-            "constraints."
+            'Custom scaling weight assigned to modulate the EDT boundary energy '
+            'constraints.'
         ),
     )
     optional.add_argument(
-        "--w_L",
+        '--w_L',
         type=float,
         default=0.5,
-        help="Contraction weight scalar multiplier variable.",
+        help='Contraction weight scalar multiplier variable.',
     )
     optional.add_argument(
-        "--w_H",
-        dest="w_H_base",
+        '--w_H',
+        dest='w_H_base',
         type=float,
         default=0.5,
-        help="Baseline structural anchor retention weight variable.",
+        help='Baseline structural anchor retention weight variable.',
     )
     optional.add_argument(
-        "--tol",
+        '--tol',
         type=float,
         default=0.05,
-        help="Convergence tolerance limit evaluated against mean vertex displacement.",
+        help='Convergence tolerance limit evaluated against mean vertex displacement.',
     )
     optional.add_argument(
-        "--decimate_every",
-        dest="decimate_every",
+        '--decimate_every',
+        dest='decimate_every',
         type=int,
         default=2,
-        help="Decimate nodes every N steps [Default=2].",
+        help='Decimate nodes every N steps [Default=2].',
     )
     optional.add_argument(
-        "--dec_grid_size",
-        dest="min_edge_length",
+        '--dec_grid_size',
+        dest='min_edge_length',
         type=float,
         default=0.5,
         help=(
-            "The Euclidean spatial threshold criteria below which two connected nodes "
-            "undergo structural merging, i.e. the isotropic voxel size of the grid used"
-            " for decimation."
+            'The Euclidean spatial threshold criteria below which two connected nodes '
+            'undergo structural merging, i.e. the isotropic voxel size of the grid used'
+            ' for decimation.'
         ),
     )
     optional.add_argument(
-        "--separate_streams",
-        action="store_true",
+        '--separate_streams',
+        action='store_true',
         help=(
-            "Separate segmentation components into individual labels using "
-            "scipy.ndimage.label and run contraction on each independently."
+            'Separate segmentation components into individual labels using '
+            'scipy.ndimage.label and run contraction on each independently.'
         ),
     )
     optional.add_argument(
-        "--label_connectivity",
+        '--label_connectivity',
         type=int,
         choices=VALID_CONNECTIVITIES,
         default=6,
-        help="Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].",
+        help='Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].',
     )
     optional.add_argument(
         "--initial_connectivity",
@@ -159,12 +163,27 @@ def _get_parser():
         help="Spatial radius used for local PCA tangent estimation [Default=2.5].",
     )
     optional.add_argument(
-        "--downsample",
-        action="store_true",
-        help="Downsample the original matrix to preserve RAM.",
+        '--n_jobs',
+        type=int,
+        default=None,
+        help=(
+            'Number of parallel jobs. If not set or <=0, defaults to '
+            '~30%% of available CPU cores.'
+        ),
     )
     optional.add_argument(
-        "-h", "--help", action="help", help="Show this help message and exit"
+        '--downsample',
+        action='store_true',
+        help='Downsample the original matrix to preserve RAM.',
+    )
+    optional.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Base random seed for reproducible downsampling [Default=42].',
+    )
+    optional.add_argument(
+        '-h', '--help', action='help', help='Show this help message and exit'
     )
     return parser
 
@@ -581,7 +600,7 @@ def laplacian_graph_contraction_edt(
     closest_vessels_indices = None
 
     if (use_edt or enforce_containment) and binary_segmentation is not None:
-        print("Computing 3D EDT Map and boundary projection lookup tensors...")
+        print('Computing 3D EDT Map and boundary projection lookup tensors...')
         # Inverse transform tells background voxels how far they are from the foreground target mask
         background_edt, nearest_indices = ndimage.distance_transform_edt(
             binary_segmentation == 0, return_indices=True
@@ -591,23 +610,23 @@ def laplacian_graph_contraction_edt(
         vol_shape = binary_segmentation.shape
     elif (use_edt or enforce_containment) and binary_segmentation is None:
         print(
-            "Warning: No segmentation mask provided. Falling back to classic approach."
+            'Warning: No segmentation mask provided. Falling back to classic approach.'
         )
         use_edt = False
         enforce_containment = False
 
-    edt_string = f" beta_edt (EDT scale factor)={beta_edt}," if use_edt else ""
+    edt_string = f' beta_edt (EDT scale factor)={beta_edt},' if use_edt else ''
 
     print(
-        f"Starting contraction with {X.shape[0]} nodes \n\n"
-        f"Params:\n"
-        f" - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},\n"
-        f" -{edt_string} min_edge_length (decimation grid)={min_edge_length}\n\n"
-        f"Options:\n"
-        f" - Anisotropic={use_anisotropic}\n"
-        f" - EDT={use_edt}\n"
-        f" - Hard Containment={enforce_containment}\n"
-        f" - Decimation step={decimate_every}\n"
+        f'Starting contraction with {X.shape[0]} nodes \n\n'
+        f'Params:\n'
+        f' - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},\n'
+        f' -{edt_string} min_edge_length (decimation grid)={min_edge_length}\n\n'
+        f'Options:\n'
+        f' - Anisotropic={use_anisotropic}\n'
+        f' - EDT={use_edt}\n'
+        f' - Hard Containment={enforce_containment}\n'
+        f' - Decimation step={decimate_every}\n'
     )
 
     for i in range(max_iter):
@@ -627,7 +646,7 @@ def laplacian_graph_contraction_edt(
         L_squared = L.dot(L)
 
         # 2. Extract localized retention matrix mapping
-        max_pull = ""
+        max_pull = ''
 
         if use_edt:
             ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
@@ -635,10 +654,10 @@ def laplacian_graph_contraction_edt(
             iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
             node_distances = edt_volume[ix, iy, iz]
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
-            W_H_sq = sparse.diags(w_H_per_node**2, format="csr")
-            max_pull = f" - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}"
+            W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
+            max_pull = f' - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}'
         else:
-            W_H_sq = sparse.eye(n_vertices, format="csr") * (w_H_base**2)
+            W_H_sq = sparse.eye(n_vertices, format='csr') * (w_H_base**2)
 
         # 3. Solve Implicit Update System equations
         A = (w_L**2) * L_squared + W_H_sq
@@ -675,19 +694,19 @@ def laplacian_graph_contraction_edt(
                 X_next[escaped_mask] = np.stack(
                     [proj_x, proj_y, proj_z], axis=1
                 ).astype(float)
-                max_pull += f" [Projected: {escaped_count} escaped nodes]"
+                max_pull += f' [Projected: {escaped_count} escaped nodes]'
 
         displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
         X = X_next
         previous_tangents = current_tangents
 
         print(
-            f"Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - "
-            f"Error Drift: {displacement:.5f}{max_pull}"
+            f'Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - '
+            f'Error Drift: {displacement:.5f}{max_pull}'
         )
 
         if displacement < tol:
-            print("Convergence criteria reached.")
+            print('Convergence criteria reached.')
             break
 
         if (i + 1) % decimate_every == 0:
@@ -735,6 +754,105 @@ def coords_to_dense_3d(X, volume_shape):
     return dense_volume
 
 
+def _process_single_label(
+    label_id,
+    labeled_volume,
+    use_edt,
+    use_anisotropic,
+    enforce_containment,
+    beta_edt,
+    w_L,
+    w_H_base,
+    tol,
+    decimate_every,
+    min_edge_length,
+    num_features,
+):
+    """
+    Worker function to process a single connected component label.
+
+    Parameters
+    ----------
+    label_id : int
+        ID of current label
+    labeled_volume : np.ndarray
+        Segmentation labelled with scipy's label.
+    use_edt : bool
+        Enables boundary tracking potential constraints using Euclidean Distance Transforms.
+    use_anisotropic : bool
+        Enables anisotropic geometry handling to penalize internal longitudinal
+        shortening vectors.
+    enforce_containment : bool
+        If True, applies a hard projection constraint to force nodes drifting out of the
+        foreground mask onto the closest inner boundary shell surface voxel.
+    beta_edt : float
+        Scaling modulation weight assigned to boundary energy calculation properties.
+    w_L : float
+        Contraction weight step modifier targeting structural local geometric collapse.
+        This should be alpha in Damseh 2021.
+    w_H_base : float
+        Baseline structural node anchor positional persistence value metric.
+        This should be equivalent to beta in Damseh 2021.
+    tol : float
+        Convergence tolerance limit evaluated against mean vertex displacement.
+        This should be the equivalent of gamma in Damseh 2021 (not sure).
+    decimate_every : int
+        Frequency cadence interval defining how many contraction loop steps occur before
+        triggering an edge-collapse decimation execution.
+    min_edge_length : float
+        The Euclidean spatial threshold criteria below which two connected nodes undergo
+        structural merging, i.e. the isotropic voxel size of the grid used for
+        decimation.
+    num_features : int
+        Number of extracted labels.
+
+    Returns
+    -------
+    label_id : int
+        ID of current label (For tracking)
+    contracted_X : numpy.ndarray
+        An (M, 3) matrix mapping the continuous 3D spatial points along the skeleton path.
+    final_adj : scipy.sparse.csr_matrix
+        The resulting graph sparse adjacency connectivity representation of shape (M, M).
+    """
+    segment = labeled_volume == label_id
+    X_init = np.argwhere(segment).astype(float)
+
+    # Skip small noise components
+    if len(X_init) < 3:
+        dists = cdist(X_init, X_init)
+        adj_matrix = (dists > 0) & (dists < 2.5)
+
+        return label_id, X_init, sparse.csr_matrix(adj_matrix)
+
+    print(
+        f'\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---'
+    )
+
+    print('Computing proximity network coordinates...')
+    dists = cdist(X_init, X_init)
+    adj_matrix = (dists > 0) & (dists < 2.5)
+    adj_sparse = sparse.csr_matrix(adj_matrix)
+
+    # Run contraction on this label's component mask
+    label_X, label_adj = laplacian_graph_contraction_edt(
+        X_init,
+        adj_sparse,
+        binary_segmentation=segment,
+        use_edt=use_edt,
+        use_anisotropic=use_anisotropic,
+        enforce_containment=enforce_containment,
+        beta_edt=beta_edt,
+        w_L=w_L,
+        w_H_base=w_H_base,
+        tol=tol,
+        decimate_every=decimate_every,
+        min_edge_length=min_edge_length,
+    )
+
+    return label_id, label_X, label_adj
+
+
 def laplacian_skeletonisation(
     nifti_path,
     out_path=None,
@@ -748,10 +866,12 @@ def laplacian_skeletonisation(
     decimate_every=2,
     min_edge_length=0.5,
     downsample=False,
+    seed=42,
     separate_streams=False,
     label_connectivity=6,
     initial_connectivity=26,
     pca_radius=2.5,
+    n_jobs=None,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -795,6 +915,8 @@ def laplacian_skeletonisation(
     downsample : bool, optional
         Flag setting whether point arrays containing high density are uniformly downsampled
         to stay within safe RAM footprints. Default is False.
+    seed : int, optional
+        Base random seed for reproducible downsampling (42 is default).
     separate_streams : bool, optional
         Process each "independent" vessel by itself (i.e. non-connected segment)
     label_connectivity : 6, 18, 26, optional
@@ -804,6 +926,9 @@ def laplacian_skeletonisation(
     pca_radius : float, optional
         Finite, strictly positive spatial radius used to select local PCA tangent
         samples. Default is 2.5.
+    n_jobs : None, optional
+        Number of parallel jobs. If not set or <=0, defaults to ~30%% of available CPU
+        cores.
 
     Returns
     -------
@@ -811,6 +936,8 @@ def laplacian_skeletonisation(
         An (M, 3) matrix mapping the continuous 3D spatial points along the skeleton path.
     final_adj : scipy.sparse.csr_matrix
         The resulting graph sparse adjacency connectivity representation of shape (M, M).
+    nifti_skel : numpy.ndarray
+        A dense nifti matrix with the skeleton inside.
 
     Raises
     ------
@@ -820,17 +947,17 @@ def laplacian_skeletonisation(
     initial_connectivity = _validate_initial_connectivity(initial_connectivity)
     pca_radius = _validate_pca_radius(pca_radius)
 
-    print(f"Ingesting NIfTI image: {nifti_path}")
+    print(f'Ingesting NIfTI image: {nifti_path}')
     _, volume_data, img = io.load_nifti_get_mask(nifti_path, is_mask=True, ndim=3)
 
     if not np.any(volume_data):
-        raise ValueError("Provided segmentation volume lacks any foreground structure.")
+        raise ValueError('Provided segmentation volume lacks any foreground structure.')
 
     # Downsample points cloud initialization limits if necessary to guard RAM bounds
     if downsample and np.any(volume_data) > 200000:
-        print(f"Volume contains {np.any(volume_data)} points. Downsampling.")
+        print(f'Volume contains {np.any(volume_data)} points. Downsampling.')
         vessel_voxels = np.argwhere(volume_data).astype(float)
-        rng = np.random.default_rng(seed=42)
+        rng = np.random.default_rng(seed=seed)
         idx = rng.choice(len(vessel_voxels), 150000, replace=False)
         vessel_voxels = vessel_voxels[idx]
         volume_data = coords_to_dense_3d(vessel_voxels, volume_data.shape)
@@ -840,7 +967,7 @@ def laplacian_skeletonisation(
         CONN = {6: 1, 18: 2, 26: 3}
         if label_connectivity not in CONN:
             raise ValueError(
-                f"Label connectivity {label_connectivity} is not a valid option [6, 18, 26]."
+                f'Label connectivity {label_connectivity} is not a valid option [6, 18, 26].'
             )
 
         labeled_volume, num_features = ndimage.label(
@@ -848,8 +975,8 @@ def laplacian_skeletonisation(
             structure=ndimage.generate_binary_structure(3, CONN[label_connectivity]),
         )
         print(
-            f"Divided volume into {num_features} distinct label components "
-            f"({label_connectivity}-connectivity)."
+            f'Divided volume into {num_features} distinct label components '
+            f'({label_connectivity}-connectivity).'
         )
     else:
         labeled_volume, num_features = volume_data * 1, 1
@@ -857,70 +984,61 @@ def laplacian_skeletonisation(
     contracted_X_list = []
     adj_list = []
 
-    for label_id in range(1, num_features + 1):
-        segment = labeled_volume == label_id
-        X_init = np.argwhere(segment).astype(float)
+    total_cores = os.cpu_count() or 1
+    if n_jobs is None or n_jobs <= 0:
+        n_workers = max(1, int(np.floor(0.30 * total_cores)))
+    else:
+        n_workers = min(n_jobs, total_cores)
 
-        # Skip small noise components
-        if len(X_init) < 3:
-            adj_list.append(
-                _build_initial_adjacency(X_init, initial_connectivity)
-            )
-            contracted_X_list.append(X_init)
+    print(
+        f'Processing {num_features} components in parallel using {n_workers} worker(s) '
+        f'on {total_cores} CPU cores detected.'
+    )
 
-            continue
-
-        if separate_streams:
-            print(
-                f"\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---"
-            )
-
-        print("Computing proximity network coordinates...")
-        adj_sparse = _build_initial_adjacency(X_init, initial_connectivity)
-
-        # Run contraction on this label's component mask
-        contracted_X, final_adj = laplacian_graph_contraction_edt(
-            X_init,
-            adj_sparse,
-            binary_segmentation=segment,
-            use_edt=use_edt,
-            use_anisotropic=use_anisotropic,
-            enforce_containment=enforce_containment,
-            beta_edt=beta_edt,
-            w_L=w_L,
-            w_H_base=w_H_base,
-            tol=tol,
-            decimate_every=decimate_every,
-            min_edge_length=min_edge_length,
+    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(
+        delayed(_process_single_label)(
+            label_id,
+            labeled_volume,
+            use_edt,
+            use_anisotropic,
+            enforce_containment,
+            beta_edt,
+            w_L,
+            w_H_base,
+            tol,
+            decimate_every,
+            min_edge_length,
+            num_features,
             pca_radius=pca_radius,
         )
+        for label_id in range(1, num_features + 1)
+    )
 
-        contracted_X_list.append(contracted_X)
-        adj_list.append(final_adj)
+    print('Reuniting results from parallel jobs.')
 
-    if not contracted_X_list:
-        raise ValueError("No valid components found for contraction.")
+    if not results:
+        raise ValueError('No valid components found for contraction.')
 
     # Merge coordinates and sparse block-diagonal adjacency matrices across all labels
-    contracted_X = np.vstack(contracted_X_list)
-    final_adj = sparse.block_diag(adj_list, format="csr")
+    contracted_X = np.vstack([res[1] for res in results])
+    final_adj = sparse.block_diag([res[2] for res in results], format='csr')
 
     out_path = (
         out_path
         if out_path
-        else f"{os.path.splitext(os.path.splitext(nifti_path)[0])[0]}_skel"
+        else f'{os.path.splitext(os.path.splitext(nifti_path)[0])[0]}_skel'
     )
 
-    print(f"\nSaving structural centerline data matrices to: {out_path}")
-    np.savez_compressed(f"{out_path}_coords.npz", contracted_X=contracted_X)
-    sparse.save_npz(f"{out_path}.npz", final_adj)
+    print(f'\nSaving structural centerline data matrices to: {out_path}')
+    np.savez_compressed(f'{out_path}_coords.npz', contracted_X=contracted_X)
+    sparse.save_npz(f'{out_path}.npz', final_adj)
     nifti_skel = coords_to_dense_3d(contracted_X, volume_data.shape)
 
     # If enforce containment was used, assume no loss of tracts masking with original segmentation.
     if enforce_containment:
         nifti_skel = nifti_skel * volume_data
 
-    io.export_nifti(nifti_skel, img, f"{out_path}.nii.gz")
+    io.export_nifti(nifti_skel, img, f'{out_path}.nii.gz')
 
     return contracted_X, final_adj, nifti_skel
 
@@ -931,5 +1049,5 @@ def _main(argv=None):
     laplacian_skeletonisation(**vars(args))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     _main(sys.argv[1:])

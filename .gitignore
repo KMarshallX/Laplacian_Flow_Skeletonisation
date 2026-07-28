@@ -140,3 +140,5 @@ dmypy.json
 AGENTS.md
 LOG.md
 laplskel/tests/*
+
+.vscode/
