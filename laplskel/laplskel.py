@@ -12,7 +12,6 @@ from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
 
 from nigsp import io
-from scipy.spatial.distance import cdist
 from tqdm_joblib import ParallelPbar
 
 
@@ -767,6 +766,8 @@ def _process_single_label(
     decimate_every,
     min_edge_length,
     num_features,
+    initial_connectivity,
+    pca_radius,
 ):
     """
     Worker function to process a single connected component label.
@@ -805,6 +806,10 @@ def _process_single_label(
         decimation.
     num_features : int
         Number of extracted labels.
+    initial_connectivity : 6, 18, or 26
+        Voxel connectivity used to build the initial foreground graph.
+    pca_radius : float
+        Spatial radius used for local PCA tangent estimation.
 
     Returns
     -------
@@ -820,19 +825,15 @@ def _process_single_label(
 
     # Skip small noise components
     if len(X_init) < 3:
-        dists = cdist(X_init, X_init)
-        adj_matrix = (dists > 0) & (dists < 2.5)
-
-        return label_id, X_init, sparse.csr_matrix(adj_matrix)
+        adj_sparse = _build_initial_adjacency(X_init, initial_connectivity)
+        return label_id, X_init, adj_sparse
 
     print(
         f'\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---'
     )
 
     print('Computing proximity network coordinates...')
-    dists = cdist(X_init, X_init)
-    adj_matrix = (dists > 0) & (dists < 2.5)
-    adj_sparse = sparse.csr_matrix(adj_matrix)
+    adj_sparse = _build_initial_adjacency(X_init, initial_connectivity)
 
     # Run contraction on this label's component mask
     label_X, label_adj = laplacian_graph_contraction_edt(
@@ -848,6 +849,7 @@ def _process_single_label(
         tol=tol,
         decimate_every=decimate_every,
         min_edge_length=min_edge_length,
+        pca_radius=pca_radius,
     )
 
     return label_id, label_X, label_adj
@@ -1009,6 +1011,7 @@ def laplacian_skeletonisation(
             decimate_every,
             min_edge_length,
             num_features,
+            initial_connectivity=initial_connectivity,
             pca_radius=pca_radius,
         )
         for label_id in range(1, num_features + 1)
