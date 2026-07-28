@@ -9,7 +9,7 @@ from joblib import delayed
 from nigsp import io
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
-from scipy.spatial.distance import cdist
+from scipy.spatial import KDTree
 from tqdm_joblib import ParallelPbar
 
 
@@ -114,6 +114,15 @@ def _get_parser():
             'The Euclidean spatial threshold criteria below which two connected nodes '
             'undergo structural merging, i.e. the isotropic voxel size of the grid used'
             ' for decimation.'
+        ),
+    )
+    optional.add_argument(
+        '--max_distance_adjmat',
+        dest='max_distance',
+        type=float,
+        default=2.4999,
+        help=(
+            'Maximum distance to consider when computing the sparse adjacency matrix.'
         ),
     )
     optional.add_argument(
@@ -539,6 +548,31 @@ def coords_to_dense_3d(X, volume_shape):
     return dense_volume
 
 
+def compute_sparse_adjacency_matrix(tree, max_distance=2.4999):
+    """
+    Compute sparse adjacency matrix.
+
+    Parameters
+    ----------
+    tree : scipy.spatial.KDTree
+        The tree initialised from X_init
+    max_distance : float, optional
+        Max distance to consider in the tree to compute the adj matrix
+
+    Returns
+    -------
+    adj_sparse : scipy.sparse.csr_matrix
+        Sparse adjacency matrix
+    """
+    # Returns a sparse adjacency matrix directly for distances strictly within radius (0, 2.5)
+    adj_sparse = tree.sparse_distance_matrix(tree, max_distance=max_distance).tocsr()
+    # Remove self-loops (distance == 0 on diagonal)
+    adj_sparse.setdiag(0)
+    adj_sparse.eliminate_zeros()
+
+    return (adj_sparse > 0).astype(bool)
+
+
 def _process_single_label(
     label_id,
     labeled_volume,
@@ -549,6 +583,7 @@ def _process_single_label(
     w_L,
     w_H_base,
     tol,
+    max_distance,
     decimate_every,
     min_edge_length,
     num_features,
@@ -581,6 +616,8 @@ def _process_single_label(
     tol : float
         Convergence tolerance limit evaluated against mean vertex displacement.
         This should be the equivalent of gamma in Damseh 2021 (not sure).
+    max_distance : float
+        Maximum distance to consider when making the sparse adjacency matrix.
     decimate_every : int
         Frequency cadence interval defining how many contraction loop steps occur before
         triggering an edge-collapse decimation execution.
@@ -602,22 +639,20 @@ def _process_single_label(
     """
     segment = labeled_volume == label_id
     X_init = np.argwhere(segment).astype(float)
+    tree = KDTree(X_init)
 
     # Skip small noise components
     if len(X_init) < 3:
-        dists = cdist(X_init, X_init)
-        adj_matrix = (dists > 0) & (dists < 2.5)
+        adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
-        return label_id, X_init, sparse.csr_matrix(adj_matrix)
+        return label_id, X_init, adj_sparse
 
     print(
         f'\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---'
     )
 
     print('Computing proximity network coordinates...')
-    dists = cdist(X_init, X_init)
-    adj_matrix = (dists > 0) & (dists < 2.5)
-    adj_sparse = sparse.csr_matrix(adj_matrix)
+    adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
     # Run contraction on this label's component mask
     label_X, label_adj = laplacian_graph_contraction_edt(
@@ -654,6 +689,7 @@ def laplacian_skeletonisation(
     seed=42,
     separate_streams=False,
     label_connectivity=6,
+    max_distance=2.4999,
     n_jobs=None,
 ):
     """
@@ -704,6 +740,8 @@ def laplacian_skeletonisation(
         Process each "independent" vessel by itself (i.e. non-connected segment)
     label_connectivity : 6, 18, 26, optional
         Connectivity profile to use to separate streams - 6, 18, or 26 edges.
+    max_distance : float
+        Maximum distance to consider when making the sparse adjacency matrix.
     n_jobs : None, optional
         Number of parallel jobs. If not set or <=0, defaults to ~30%% of available CPU
         cores.
@@ -781,6 +819,7 @@ def laplacian_skeletonisation(
             w_L,
             w_H_base,
             tol,
+            max_distance,
             decimate_every,
             min_edge_length,
             num_features,
