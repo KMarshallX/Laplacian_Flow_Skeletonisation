@@ -1,3 +1,28 @@
+# 0.4.0 (Tue Jul 28 2026)
+
+#### 🚀 Enhancement
+
+- feat: Label and reorder in reverse round-robin fashion ([@smoia](https://github.com/smoia))
+- feat: Label and reverse-sort by size ([@smoia](https://github.com/smoia))
+
+#### Authors: 1
+
+- Stefano Moia ([@smoia](https://github.com/smoia))
+
+---
+
+# 0.3.0 (Tue Jul 28 2026)
+
+#### 🚀 Enhancement
+
+- feat: Try to fix OOM error via KDTree ([@smoia](https://github.com/smoia))
+
+#### Authors: 1
+
+- Stefano Moia ([@smoia](https://github.com/smoia))
+
+---
+
 # 0.2.1 (Mon Jul 27 2026)
 
 #### 🐛 Bug Fix
