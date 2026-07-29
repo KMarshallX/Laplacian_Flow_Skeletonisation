@@ -9,7 +9,7 @@ from joblib import delayed
 from nigsp import io
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import spsolve
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 from tqdm_joblib import ParallelPbar
 
 
@@ -294,7 +294,7 @@ def _estimate_local_tangents(
 
     # Coordinates contract on every solver step, so this tree must not be reused
     # between calls.
-    tree = cKDTree(X)
+    tree = KDTree(X)
     radius_neighbours = tree.query_ball_point(X, r=pca_radius)
     tangents = np.zeros_like(X, dtype=float)
 
