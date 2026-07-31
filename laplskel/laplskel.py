@@ -376,7 +376,7 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     # Track merged positions without mutating X during the loop
     # We maintain running coordinate sums and vertex counts for each root
     coord_sums = X.copy()
-    node_counts = np.ones(n_vertices, dtype=np.int32)
+    node_counts = np.ones(n_vertices, dtype=int)
 
     for u, v in zip(short_u, short_v):
         merged, root_u, root_v = uf.union(u, v)
