@@ -253,10 +253,8 @@ def compute_laplacian_matrix(
 
     # 1. Compute spatial difference vectors and Euclidean distances
     diffs = X[rows] - X[cols]
-    distances = np.linalg.norm(diffs, axis=1).astype(np.float32)
-    distances = np.maximum(
-        distances, 1e-6, dtype=np.float32
-    )  # Prevent division by zero
+    distances = np.linalg.norm(diffs, axis=1)
+    distances = np.maximum(distances, 1e-6)  # Prevent division by zero
 
     if use_anisotropic:
         # Estimate local structural tangents using local neighborhood PCA proxy
@@ -264,20 +262,20 @@ def compute_laplacian_matrix(
 
         # Compute neighbor means for all vertices via sparse matrix multiplication
         # shape: (N, 3)
-        neighbor_sums = adjacency_matrix.dot(X).astype(np.float32)
-        safe_degrees = np.maximum(degrees[:, None], 1).astype(np.float32)
+        neighbor_sums = adjacency_matrix.dot(X)
+        safe_degrees = np.maximum(degrees[:, None], 1)
         neighbor_means = neighbor_sums / safe_degrees
 
         # Compute neighbor deviations from neighbor means per edge
         # shape: (E, 3)
-        devs = (X[cols] - neighbor_means[rows]).astype(np.float32)
+        devs = X[cols] - neighbor_means[rows]
 
         # Assemble (N, 3, 3) covariance tensor using vectorized bincount
-        cov_tensor = np.zeros((n_vertices, 3, 3), dtype=np.float32)
+        cov_tensor = np.zeros((n_vertices, 3, 3), dtype=X.dtype)
 
         # 6 unique terms in a symmetric 3x3 matrix
         pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
-        denom = np.maximum(degrees - 1, 1)[:, None].astype(np.float32)
+        denom = np.maximum(degrees - 1, 1)[:, None]
 
         for r, c in pairs:
             # Aggregate outer products per vertex
@@ -293,36 +291,32 @@ def compute_laplacian_matrix(
         # Vectorized eigenvalue decomposition on tensor of shape (N, 3, 3)
         # eigvecs has shape (N, 3, 3); last column is the principal eigenvector
         eigvals, eigvecs = np.linalg.eigh(cov_tensor)
-        tangents = eigvecs[:, :, -1].astype(np.float32)
+        tangents = eigvecs[:, :, -1]
 
         # Fallback for isolated vertices/single neighbors: default to [1, 0, 0]
         fallback_mask = degrees <= 1
         if np.any(fallback_mask):
-            tangents[fallback_mask] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+            tangents[fallback_mask] = np.array([1.0, 0.0, 0.0])
 
         # Compute anisotropic components per edge
         t_i = tangents[rows]
-        dot_products = np.sum(diffs * t_i, axis=1, dtype=np.float32)
+        dot_products = np.sum(diffs * t_i, axis=1)
 
         tangential_comps = np.abs(dot_products)
-        normal_comps = np.linalg.norm(
-            diffs - (dot_products[:, None] * t_i), axis=1
-        ).astype(np.float32)
+        normal_comps = np.linalg.norm(diffs - (dot_products[:, None] * t_i), axis=1)
 
         aniso_mod = (alpha_norm * normal_comps) + (alpha_tang * tangential_comps)
-        weights = (aniso_mod / distances).astype(np.float32)
+        weights = aniso_mod / distances
     else:
         # Standard Isotropic Weights
-        weights = (1.0 / distances).astype(np.float32)
+        weights = 1.0 / distances
 
     # Assemble sparse operators
-    W = sparse.csr_matrix(
-        (weights, (rows, cols)), shape=(n_vertices, n_vertices), dtype=np.float32
-    )
+    W = sparse.csr_matrix((weights, (rows, cols)), shape=(n_vertices, n_vertices))
 
     # Build diagonal degree matrix D
-    degree_values = np.array(W.sum(axis=1), dtype=np.float32).flatten()
-    D = sparse.diags(degree_values, format='csr', dtype=np.float32)
+    degree_values = np.array(W.sum(axis=1)).flatten()
+    D = sparse.diags(degree_values, format='csr')
 
     return D - W
 
@@ -492,7 +486,7 @@ def laplacian_graph_contraction_edt(
     adj : scipy.sparse.csr_matrix
         Decimated skeleton topology graph connectivity representation of shape (M, M).
     """
-    X = X_init.copy().astype(np.float32)
+    X = X_init.copy().astype(float)
     adj = adj_init.copy()
 
     # Conditional 3D EDT & Hard-Voxel Constraint Lookup Precomputation
@@ -557,25 +551,23 @@ def laplacian_graph_contraction_edt(
             # map_coordinates expects shape (ndim, N), so pass X.T
             node_distances = ndimage.map_coordinates(
                 edt_volume, X.T, order=1, mode='nearest'
-            ).astype(np.float32)
+            )
 
             # Prevent divide-by-zero/negative issues from interpolation near boundary
-            node_distances = np.maximum(node_distances, 0.0, dtype=np.float32)
+            node_distances = np.maximum(node_distances, 0.0)
 
-            w_H_per_node = (
-                w_H_base * np.exp(beta_edt / (node_distances + delta))
-            ).astype(np.float32)
-            W_H_sq = sparse.diags(w_H_per_node**2, format='csr', dtype=np.float32)
+            w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
+            W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
             max_pull = f' - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}'
         else:
             W_H_sq = sparse.eye(n_vertices, format='csr') * (w_H_base**2)
 
         # 3. Solve Implicit Update System equations
-        A = ((w_L**2) * L_squared + W_H_sq).astype(np.float32)
-        B = W_H_sq.dot(X).astype(np.float32)
+        A = (w_L**2) * L_squared + W_H_sq
+        B = W_H_sq.dot(X)
 
         if solver == 'LU':
-            X_next = np.zeros_like(X, dtype=np.float32)
+            X_next = np.zeros_like(X)
             for dim in range(3):
                 X_next[:, dim] = spsolve(A, B[:, dim])
 
