@@ -523,10 +523,15 @@ def laplacian_graph_contraction_edt(
         max_pull = ''
 
         if use_edt:
-            ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
-            iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
-            iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
-            node_distances = edt_volume[ix, iy, iz]
+            # Find value of EDT_volume by trilinear interpolation of new coordinates.
+            # map_coordinates expects shape (ndim, N), so pass X.T
+            node_distances = ndimage.map_coordinates(
+                edt_volume, X.T, order=1, mode='nearest'
+            )
+
+            # Prevent divide-by-zero/negative issues from interpolation near boundary
+            node_distances = np.maximum(node_distances, 0.0)
+
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
             W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
             max_pull = f' - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}'
