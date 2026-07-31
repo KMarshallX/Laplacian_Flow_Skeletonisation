@@ -216,24 +216,53 @@ def compute_laplacian_matrix(
 
     if use_anisotropic:
         # Estimate local structural tangents using local neighborhood PCA proxy
-        tangents = np.zeros_like(X)
-        for i in range(n_vertices):
-            neighbors = cols[rows == i]
-            if len(neighbors) > 1:
-                cov = np.cov(X[neighbors].T)
-                eigvals, eigvecs = np.linalg.eigh(cov)
-                tangents[i] = eigvecs[:, -1]  # Principal directional eigenvector
-            else:
-                tangents[i] = np.array([1.0, 0.0, 0.0])
+        degrees = np.bincount(rows, minlength=n_vertices)
 
+        # Compute neighbor means for all vertices via sparse matrix multiplication
+        # shape: (N, 3)
+        neighbor_sums = adjacency_matrix.dot(X)
+        safe_degrees = np.maximum(degrees[:, None], 1)
+        neighbor_means = neighbor_sums / safe_degrees
+
+        # Compute neighbor deviations from neighbor means per edge
+        # shape: (E, 3)
+        devs = X[cols] - neighbor_means[rows]
+
+        # Assemble (N, 3, 3) covariance tensor using vectorized bincount
+        cov_tensor = np.zeros((n_vertices, 3, 3), dtype=X.dtype)
+
+        # 6 unique terms in a symmetric 3x3 matrix
+        pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+        denom = np.maximum(degrees - 1, 1)[:, None]
+
+        for r, c in pairs:
+            # Aggregate outer products per vertex
+            cov_val = np.bincount(
+                rows, weights=devs[:, r] * devs[:, c], minlength=n_vertices
+            )
+            cov_tensor[:, r, c] = cov_val
+            if r != c:
+                cov_tensor[:, c, r] = cov_val  # Symmetric fill
+
+        cov_tensor /= denom[:, :, None]
+
+        # Vectorized eigenvalue decomposition on tensor of shape (N, 3, 3)
+        # eigvecs has shape (N, 3, 3); last column is the principal eigenvector
+        eigvals, eigvecs = np.linalg.eigh(cov_tensor)
+        tangents = eigvecs[:, :, -1]
+
+        # Fallback for isolated vertices/single neighbors: default to [1, 0, 0]
+        fallback_mask = degrees <= 1
+        if np.any(fallback_mask):
+            tangents[fallback_mask] = np.array([1.0, 0.0, 0.0])
+
+        # Compute anisotropic components per edge
         t_i = tangents[rows]
         dot_products = np.sum(diffs * t_i, axis=1)
 
-        # Decompose into longitudinal and cross-sectional components
         tangential_comps = np.abs(dot_products)
         normal_comps = np.linalg.norm(diffs - (dot_products[:, None] * t_i), axis=1)
 
-        # Scale the affinity weights using the anisotropy parameters
         aniso_mod = (alpha_norm * normal_comps) + (alpha_tang * tangential_comps)
         weights = aniso_mod / distances
     else:
@@ -245,10 +274,7 @@ def compute_laplacian_matrix(
 
     # Build diagonal degree matrix D
     degree_values = np.array(W.sum(axis=1)).flatten()
-    D = sparse.csr_matrix(
-        (degree_values, (range(n_vertices), range(n_vertices))),
-        shape=(n_vertices, n_vertices),
-    )
+    D = sparse.diags(degree_values, format='csr')
 
     return D - W
 
