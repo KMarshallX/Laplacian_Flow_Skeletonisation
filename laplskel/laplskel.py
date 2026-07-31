@@ -14,6 +14,31 @@ from scipy.spatial import KDTree
 from tqdm_joblib import ParallelPbar
 
 
+class UnionFind:
+    """Disjoint-set data structure with path compression for O(1) edge collapses."""
+
+    def __init__(self, n):
+        self.parent = np.arange(n)
+
+    def find(self, i):
+        # Path compression: update parent pointers recursively
+        path = []
+        while self.parent[i] != i:
+            path.append(i)
+            i = self.parent[i]
+        for node in path:
+            self.parent[node] = i
+        return i
+
+    def union(self, i, j):
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            self.parent[root_j] = root_i
+            return True, root_i, root_j
+        return False, root_i, root_j
+
+
 def _get_parser():
     """
     Parse command line inputs for this function.
@@ -310,39 +335,52 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     n_vertices = X.shape[0]
     rows, cols = adjacency_matrix.nonzero()
 
-    # Keep track of which vertices are mapped/merged to which
-    vertex_map = np.arange(n_vertices)
+    # Only process upper triangle of the symmetric matrix (unique undirected edges)
+    edge_mask = rows < cols
+    u_nodes = rows[edge_mask]
+    v_nodes = cols[edge_mask]
 
-    for u, v in zip(rows, cols):
-        if u >= v:
-            continue  # Only check each unique undirected edge once
+    # Calculate Euclidean distances for all unique edges at once
+    edge_dists = np.linalg.norm(X[u_nodes] - X[v_nodes], axis=1)
 
-        # Check if the edge is shorter than the allowed threshold
-        dist = np.linalg.norm(X[u] - X[v])
-        if dist < min_edge_length:
-            root_u = vertex_map[u]
-            root_v = vertex_map[v]
-            if root_u != root_v:
-                # Merge v into u: update positions to their average
-                X[root_u] = (X[root_u] + X[root_v]) / 2.0
-                vertex_map[vertex_map == root_v] = root_u
+    # Filter edges that are shorter than the threshold
+    collapse_mask = edge_dists < min_edge_length
+    short_u = u_nodes[collapse_mask]
+    short_v = v_nodes[collapse_mask]
 
-    # Remap unique remaining vertices
-    unique_verts, inverse_indices = np.unique(vertex_map, return_inverse=True)
-    new_X = X[unique_verts]
+    uf = UnionFind(n_vertices)
 
-    # Rebuild the simplified adjacency matrix
+    # Track merged positions without mutating X during the loop
+    # We maintain running coordinate sums and vertex counts for each root
+    coord_sums = X.copy()
+    node_counts = np.ones(n_vertices, dtype=int)
+
+    for u, v in zip(short_u, short_v):
+        merged, root_u, root_v = uf.union(u, v)
+        if merged:
+            # Accumulate positions into the new combined root
+            coord_sums[root_u] += coord_sums[root_v]
+            node_counts[root_u] += node_counts[root_v]
+
+    # Resolve final root assignments for every vertex
+    final_roots = np.array([uf.find(i) for i in range(n_vertices)])
+
+    # Compute averaged coordinates for each root
+    unique_roots, inverse_indices = np.unique(final_roots, return_inverse=True)
+    new_X = coord_sums[unique_roots] / node_counts[unique_roots][:, None]
+
+    # Rebuild the simplified adjacency matrix using remapped indices
     new_rows = inverse_indices[rows]
     new_cols = inverse_indices[cols]
 
-    # Remove self-loops and duplicates
+    # Remove self-loops
     valid_mask = new_rows != new_cols
     new_rows = new_rows[valid_mask]
     new_cols = new_cols[valid_mask]
 
     new_data = np.ones(len(new_rows), dtype=bool)
     new_adj = sparse.csr_matrix(
-        (new_data, (new_rows, new_cols)), shape=(len(unique_verts), len(unique_verts))
+        (new_data, (new_rows, new_cols)), shape=(len(unique_roots), len(unique_roots))
     )
 
     return new_X, new_adj
