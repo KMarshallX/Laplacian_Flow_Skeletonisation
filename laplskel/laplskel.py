@@ -794,7 +794,7 @@ def _process_single_label(
     return label_id, label_X_global, label_adj
 
 
-def label_and_sort(binary_mask, label_connectivity=6):
+def label_and_sort_by_size(binary_mask, label_connectivity=6):
     """
     Label connected components and re-order by size in reverse round-robin fashion.
 
@@ -836,12 +836,16 @@ def label_and_sort(binary_mask, label_connectivity=6):
     if num_features == 0:
         return labeled_volume, 0
 
-    counts = np.bincount(labeled_volume.ravel())
-    # Exclude background (index 0) and sort descending
-    sorted_labels = np.argsort(counts[1:])[::-1] + 1
+    sizes = ndimage.sum(
+        binary_mask,
+        labeled_volume,
+        index=np.arange(1, num_features + 1, dtype=np.int32),
+    )
+    # Sort descending
+    sorted_labels = np.argsort(sizes)[::-1] + 1
 
     mapping = np.zeros(num_features + 1, dtype=labeled_volume.dtype)
-    mapping[final_ordered_labels] = np.arange(1, len(final_ordered_labels) + 1)
+    mapping[sorted_labels] = np.arange(1, num_features + 1, dtype=labeled_volume.dtype)
 
     return mapping[labeled_volume], num_features
 
