@@ -3,7 +3,6 @@
 import argparse
 import os
 import sys
-import tempfile
 
 import numpy as np
 from joblib import delayed
@@ -660,8 +659,7 @@ def compute_sparse_adjacency_matrix(tree, max_distance=2.4999):
 
 def _process_single_label(
     label_id,
-    labeled_volume_mmap_path,
-    lab_vol_shape,
+    labeled_volume,
     use_edt,
     use_anisotropic,
     enforce_containment,
@@ -683,9 +681,7 @@ def _process_single_label(
     label_id : int
         ID of current label
     labeled_volume_mmap_path : path
-        Path to memmap of labelled volume.
-    lab_vol_shape : tuple
-        Shape of labeled volume.
+        Segmentation labelled with scipy's label.
     use_edt : bool
         Enables boundary tracking potential constraints using Euclidean Distance Transforms.
     use_anisotropic : bool
@@ -732,10 +728,8 @@ def _process_single_label(
     final_adj : scipy.sparse.csr_matrix
         The resulting graph sparse adjacency connectivity representation of shape (M, M).
     """
-    labeled_volume = np.memmap(
-        labeled_volume_mmap_path, dtype=np.int32, mode='r', shape=lab_vol_shape
-    )
-    X_init = np.argwhere(labeled_volume == label_id).astype(np.int16)
+    segment = labeled_volume == label_id
+    X_init = np.argwhere(segment).astype(float)
     tree = KDTree(X_init)
 
     # Skip small noise components
@@ -755,7 +749,7 @@ def _process_single_label(
     label_X, label_adj = laplacian_graph_contraction_edt(
         X_init,
         adj_sparse,
-        binary_segmentation=labeled_volume == label_id,
+        binary_segmentation=segment,
         use_edt=use_edt,
         use_anisotropic=use_anisotropic,
         enforce_containment=enforce_containment,
@@ -972,20 +966,6 @@ def laplacian_skeletonisation(
     else:
         labeled_volume, num_features = volume_data * 1, 1
 
-    temp_dir = tempfile.mkdtemp()
-    labeled_volume_mmap_path = os.path.join(temp_dir, 'labeled_vol.dat')
-    lab_vol_shape = labeled_volume.shape
-    fp = np.memmap(
-        labeled_volume_mmap_path,
-        dtype=np.int32,
-        mode='w+',
-        shape=lab_vol_shape,
-    )
-    fp[:] = labeled_volume[:]
-    fp.flush()
-    del fp
-    del labeled_volume
-
     total_cores = os.cpu_count() or 1
     if n_jobs is None or n_jobs <= 0:
         n_workers = max(1, int(np.floor(0.30 * total_cores)))
@@ -997,32 +977,25 @@ def laplacian_skeletonisation(
         f'on {total_cores} CPU cores detected.'
     )
 
-    try:
-        results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(
-            delayed(_process_single_label)(
-                label_id,
-                labeled_volume_mmap_path,
-                lab_vol_shape,
-                use_edt,
-                use_anisotropic,
-                enforce_containment,
-                beta_edt,
-                w_L,
-                w_H_base,
-                tol,
-                max_distance,
-                decimate_every,
-                min_edge_length,
-                num_features,
-                solver,
-            )
-            for label_id in range(1, num_features + 1)
+    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(
+        delayed(_process_single_label)(
+            label_id,
+            labeled_volume,
+            use_edt,
+            use_anisotropic,
+            enforce_containment,
+            beta_edt,
+            w_L,
+            w_H_base,
+            tol,
+            max_distance,
+            decimate_every,
+            min_edge_length,
+            num_features,
+            solver,
         )
-    finally:
-        print('Clean up temp files')
-        if os.path.exists(labeled_volume_mmap_path):
-            os.remove(labeled_volume_mmap_path)
-        os.rmdir(temp_dir)
+        for label_id in range(1, num_features + 1)
+    )
 
     print('Reuniting results from parallel jobs.')
 
