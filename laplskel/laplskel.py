@@ -403,7 +403,7 @@ def laplacian_graph_contraction_edt(
     min_edge_length=0.5,
     alpha_norm=1.5,
     alpha_tang=0.1,
-    solver='CG',
+    solver='AMGCG',
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -455,9 +455,11 @@ def laplacian_graph_contraction_edt(
     alpha_tang : float, optional
         The tangential/longitudinal orientation penalty parameter used during anisotropic calculation phases.
         Default is 0.1.
-    solver : ['LU', 'CG'], string, optional
+    solver : ['LU', 'CG', 'AMGCG'], string, optional
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
-        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big data.
+        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
+        data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
+        running CG
 
 
     Returns
@@ -532,13 +534,25 @@ def laplacian_graph_contraction_edt(
             W_H_sq = sparse.eye(n_vertices, format='csr') * (w_H_base**2)
 
         # 3. Solve Implicit Update System equations
-        if solver == 'LU':
-            A = (w_L**2) * L_squared + W_H_sq
-            B = W_H_sq.dot(X)
+        A = (w_L**2) * L_squared + W_H_sq
+        B = W_H_sq.dot(X)
 
+        if solver == 'LU':
             X_next = np.zeros_like(X)
             for dim in range(3):
                 X_next[:, dim] = spsolve(A, B[:, dim])
+
+        elif solver == 'AMGCG':
+            import pyamg
+
+            ml = pyamg.ruge_stuben_solver(A)
+            M = ml.aspreconditioner(cycle='V')
+
+            X_next = np.zeros_like(X)
+            for dim in range(3):
+                sol, info = cg(A, B[:, dim], x0=X[:, dim], M=M, rtol=1e-4, maxiter=100)
+                X_next[:, dim] = sol
+
         elif solver == 'CG':
             A = (w_L**2) * L_squared + W_H_sq
             B = W_H_sq.dot(X)
