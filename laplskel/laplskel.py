@@ -13,6 +13,9 @@ from scipy.sparse.linalg import cg, spsolve
 from scipy.spatial import KDTree
 from tqdm_joblib import ParallelPbar
 
+VALID_CONNECTIVITY = (6, 18, 26)
+VALID_SOLVER = ('LU', 'CG', 'AMGCG')
+
 
 class UnionFind:
     """Disjoint-set data structure with path compression for O(1) edge collapses."""
@@ -162,9 +165,23 @@ def _get_parser():
     optional.add_argument(
         '--label_connectivity',
         type=int,
-        choices=[6, 18, 26],
+        choices=VALID_CONNECTIVITY,
         default=6,
         help='Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].',
+    )
+    optional.add_argument(
+        '--solver',
+        type=str,
+        choices=VALID_SOLVER,
+        default='AMGCG',
+        help=(
+            'The solver to use to solve the linear system in computing the new '
+            'coordinates system. LU uses SuperLU, a direct solver, CG uses Conjugate '
+            'Gradient (iterative solver), better for memory performance on big data, '
+            'AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before '
+            'running CG, far faster (but may be a bit more memory demanding than pure '
+            'CG). Default is AMGCG.'
+        ),
     )
     optional.add_argument(
         '--n_jobs',
@@ -459,8 +476,8 @@ def laplacian_graph_contraction_edt(
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
         data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
-        running CG
-
+        running CG, which makes it far faster, but may require a tad more memory.
+        Default is AMGCG.
 
     Returns
     -------
@@ -656,6 +673,7 @@ def _process_single_label(
     decimate_every,
     min_edge_length,
     num_features,
+    solver,
 ):
     """
     Worker function to process a single connected component label.
@@ -698,6 +716,12 @@ def _process_single_label(
         decimation.
     num_features : int
         Number of extracted labels.
+    solver : ['LU', 'CG', 'AMGCG'], string, optional
+        The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
+        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
+        data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
+        running CG, which makes it far faster, but may require a tad more memory.
+        Default is AMGCG.
 
     Returns
     -------
@@ -741,6 +765,7 @@ def _process_single_label(
         tol=tol,
         decimate_every=decimate_every,
         min_edge_length=min_edge_length,
+        solver=solver,
     )
 
     return label_id, label_X, label_adj
@@ -846,6 +871,7 @@ def laplacian_skeletonisation(
     seed=42,
     separate_streams=False,
     label_connectivity=6,
+    solver='AMGCG',
     max_distance=2.4999,
     n_jobs=None,
 ):
@@ -897,6 +923,12 @@ def laplacian_skeletonisation(
         Process each "independent" vessel by itself (i.e. non-connected segment)
     label_connectivity : 6, 18, 26, optional
         Connectivity profile to use to separate streams - 6, 18, or 26 edges.
+    solver : ['LU', 'CG', 'AMGCG'], string, optional
+        The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
+        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
+        data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
+        running CG, which makes it far faster, but may require a tad more memory.
+        Default is AMGCG.
     max_distance : float
         Maximum distance to consider when making the sparse adjacency matrix.
     n_jobs : None, optional
@@ -982,6 +1014,7 @@ def laplacian_skeletonisation(
                 decimate_every,
                 min_edge_length,
                 num_features,
+                solver,
             )
             for label_id in range(1, num_features + 1)
         )
