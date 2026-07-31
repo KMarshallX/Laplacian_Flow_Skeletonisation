@@ -492,29 +492,22 @@ def laplacian_graph_contraction_edt(
     # Conditional 3D EDT & Hard-Voxel Constraint Lookup Precomputation
     edt_volume = None
     closest_vessels_indices = None
-    vol_shape = None
 
-    if binary_segmentation is not None:
+    if (use_edt or enforce_containment) and binary_segmentation is not None:
+        print('Computing 3D EDT Map and boundary projection lookup tensors...')
+        # Inverse transform tells background voxels how far they are from the foreground target mask
+        background_edt, nearest_indices = ndimage.distance_transform_edt(
+            binary_segmentation == 0, return_indices=True
+        )
+        edt_volume = ndimage.distance_transform_edt(binary_segmentation)
+        closest_vessels_indices = nearest_indices
         vol_shape = binary_segmentation.shape
-
-        # 1. Only compute the EDT potential volume if use_edt is enabled
-        if use_edt:
-            print('Computing 3D EDT Distance Volume...')
-            edt_volume = ndimage.distance_transform_edt(binary_segmentation)
-
-        # 2. ONLY compute spatial lookup index tensors if containment projection is active!
-        if enforce_containment:
-            print('Computing boundary projection lookup tensors...')
-            _, closest_vessels_indices = ndimage.distance_transform_edt(
-                binary_segmentation == 0, return_indices=True
-            )
-    else:
-        if use_edt or enforce_containment:
-            print(
-                'Warning: No segmentation mask provided. Falling back to classic approach.'
-            )
-            use_edt = False
-            enforce_containment = False
+    elif (use_edt or enforce_containment) and binary_segmentation is None:
+        print(
+            'Warning: No segmentation mask provided. Falling back to classic approach.'
+        )
+        use_edt = False
+        enforce_containment = False
 
     edt_string = f' beta_edt (EDT scale factor)={beta_edt},' if use_edt else ''
 
