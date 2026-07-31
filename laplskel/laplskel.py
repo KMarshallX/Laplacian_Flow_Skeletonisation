@@ -659,7 +659,8 @@ def compute_sparse_adjacency_matrix(tree, max_distance=2.4999):
 
 def _process_single_label(
     label_id,
-    labeled_volume,
+    cropped_label,
+    offset_origin,
     use_edt,
     use_anisotropic,
     enforce_containment,
@@ -680,8 +681,10 @@ def _process_single_label(
     ----------
     label_id : int
         ID of current label
-    labeled_volume_mmap_path : path
-        Segmentation labelled with scipy's label.
+    cropped_label : np.ndarray
+        Segmentation labelled with scipy's label and cropped with find_objects.
+    offset_origin : list
+        cropped offset.
     use_edt : bool
         Enables boundary tracking potential constraints using Euclidean Distance Transforms.
     use_anisotropic : bool
@@ -728,28 +731,28 @@ def _process_single_label(
     final_adj : scipy.sparse.csr_matrix
         The resulting graph sparse adjacency connectivity representation of shape (M, M).
     """
-    segment = labeled_volume == label_id
-    X_init = np.argwhere(segment).astype(float)
-    tree = KDTree(X_init)
+    X_init_local = np.argwhere(cropped_label).astype(np.uint16)
+    tree = KDTree(X_init_local)
 
     # Skip small noise components
-    if len(X_init) < 3:
+    if len(X_init_local) < 3:
         adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
-        return label_id, X_init, adj_sparse
+        X_init_global = X_init_local + np.array(offset_origin, dtype=np.float32)
+        return label_id, X_init_global, adj_sparse
 
     print(
-        f'\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---'
+        f'\n--- Processing Label {label_id}/{num_features} ({X_init_local.sum()} voxels) ---'
     )
 
     print('Computing proximity network coordinates...')
     adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
     # Run contraction on this label's component mask
-    label_X, label_adj = laplacian_graph_contraction_edt(
-        X_init,
+    label_X_local, label_adj = laplacian_graph_contraction_edt(
+        X_init_local,
         adj_sparse,
-        binary_segmentation=segment,
+        binary_segmentation=cropped_label,
         use_edt=use_edt,
         use_anisotropic=use_anisotropic,
         enforce_containment=enforce_containment,
@@ -762,7 +765,9 @@ def _process_single_label(
         solver=solver,
     )
 
-    return label_id, label_X, label_adj
+    label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
+
+    return label_id, label_X_global, label_adj
 
 
 def label_and_sort(binary_mask, label_connectivity=6):
@@ -952,7 +957,7 @@ def laplacian_skeletonisation(
     # Downsample points cloud initialization limits if necessary to guard RAM bounds
     if downsample and np.any(volume_data) > 200000:
         print(f'Volume contains {np.any(volume_data)} points. Downsampling.')
-        vessel_voxels = np.argwhere(volume_data).astype(np.int16)
+        vessel_voxels = np.argwhere(volume_data).astype(np.uint16)
         rng = np.random.default_rng(seed=seed)
         idx = rng.choice(len(vessel_voxels), 150000, replace=False)
         vessel_voxels = vessel_voxels[idx]
@@ -977,25 +982,47 @@ def laplacian_skeletonisation(
         f'on {total_cores} CPU cores detected.'
     )
 
-    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(
-        delayed(_process_single_label)(
-            label_id,
-            labeled_volume,
-            use_edt,
-            use_anisotropic,
-            enforce_containment,
-            beta_edt,
-            w_L,
-            w_H_base,
-            tol,
-            max_distance,
-            decimate_every,
-            min_edge_length,
-            num_features,
-            solver,
+    slices_list = ndimage.find_objects(labeled_volume)
+
+    tasks = []
+    for label_id in range(1, num_features + 1):
+        bbox_slice = slices_list[label_id - 1]
+
+        if bbox_slice is None:
+            continue
+
+        # Extract cropped boolean mask for ONLY this label
+        cropped_label = labeled_volume[bbox_slice] == label_id
+
+        # Offset origin (min_x, min_y, min_z) used to map back to original volume
+        offset_origin = (
+            bbox_slice[0].start,
+            bbox_slice[1].start,
+            bbox_slice[2].start,
         )
-        for label_id in range(1, num_features + 1)
-    )
+
+        tasks.append(
+            delayed(_process_single_label)(
+                label_id,
+                cropped_label,
+                offset_origin,
+                use_edt,
+                use_anisotropic,
+                enforce_containment,
+                beta_edt,
+                w_L,
+                w_H_base,
+                tol,
+                max_distance,
+                decimate_every,
+                min_edge_length,
+                num_features,
+                solver,
+            )
+        )
+
+    # 2. Run workers in parallel
+    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(tasks)
 
     print('Reuniting results from parallel jobs.')
 
