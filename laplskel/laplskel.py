@@ -130,14 +130,14 @@ def _get_parser():
         '--decimate_every',
         dest='decimate_every',
         type=int,
-        default=2,
+        default=1,
         help='Decimate nodes every N steps [Default=2].',
     )
     optional.add_argument(
         '--dec_grid_size',
         dest='min_edge_length',
         type=float,
-        default=0.5,
+        default=0.01,
         help=(
             'The Euclidean spatial threshold criteria below which two connected nodes '
             'undergo structural merging, i.e. the isotropic voxel size of the grid used'
@@ -172,7 +172,7 @@ def _get_parser():
         '--solver',
         type=str,
         choices=VALID_SOLVER,
-        default='AMGCG',
+        default='CG',
         help=(
             'The solver to use to solve the linear system in computing the new '
             'coordinates system. LU uses SuperLU, a direct solver, CG uses Conjugate '
@@ -415,11 +415,11 @@ def laplacian_graph_contraction(
     delta=0.5,
     max_iter=2000,
     tol=0.05,
-    decimate_every=2,
-    min_edge_length=0.5,
+    decimate_every=1,
+    min_edge_length=0.01,
     alpha_norm=1.5,
     alpha_tang=0.1,
-    solver='AMGCG',
+    solver='CG',
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -461,10 +461,10 @@ def laplacian_graph_contraction(
         Convergence tolerance limit evaluated against mean vertex displacement. Default is 1e-3.
     decimate_every : int, optional
         Frequency cadence interval defining how many contraction loop steps occur before triggering
-        an edge-collapse decimation execution. Default is 2.
+        an edge-collapse decimation execution. Default is 1.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo structural merging.
-        Default is 0.5.
+        Default is 0.01.
     alpha_norm : float, optional
         The normal/cross-sectional penalty parameter used during anisotropic calculation phases.
         Default is 1.5.
@@ -475,8 +475,8 @@ def laplacian_graph_contraction(
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
         data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
-        running CG, which makes it far faster, but may require a tad more memory.
-        Default is AMGCG.
+        running CG, which makes it faster, but may require a tad more memory.
+        Default is CG.
 
     Returns
     -------
@@ -745,7 +745,6 @@ def _process_single_label(
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
         data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
         running CG, which makes it far faster, but may require a tad more memory.
-        Default is AMGCG.
 
     Returns
     -------
@@ -889,13 +888,13 @@ def laplacian_skeletonisation(
     w_L=0.5,
     w_H_base=0.5,
     tol=0.05,
-    decimate_every=2,
-    min_edge_length=0.5,
+    decimate_every=1,
+    min_edge_length=0.01,
     downsample=False,
     seed=42,
     separate_streams=False,
     label_connectivity=6,
-    solver='AMGCG',
+    solver='CG',
     max_distance=2.4999,
     n_jobs=None,
 ):
@@ -933,11 +932,11 @@ def laplacian_skeletonisation(
         This should be the equivalent of gamma in Damseh 2021 (not sure). Default is 0.05.
     decimate_every : int, optional
         Frequency cadence interval defining how many contraction loop steps occur before
-        triggering an edge-collapse decimation execution. Default is 2.
+        triggering an edge-collapse decimation execution. Default is 1.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo
         structural merging, i.e. the isotropic voxel size of the grid used for
-        decimation. Default is 0.5.
+        decimation. Default is 0.01.
     downsample : bool, optional
         Flag setting whether point arrays containing high density are uniformly downsampled
         to stay within safe RAM footprints. Default is False.
@@ -952,7 +951,7 @@ def laplacian_skeletonisation(
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
         data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
         running CG, which makes it far faster, but may require a tad more memory.
-        Default is AMGCG.
+        Default is CG.
     max_distance : float
         Maximum distance to consider when making the sparse adjacency matrix.
     n_jobs : None, optional
