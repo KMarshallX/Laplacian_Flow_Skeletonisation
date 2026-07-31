@@ -402,7 +402,7 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     return new_X, new_adj
 
 
-def laplacian_graph_contraction_edt(
+def laplacian_graph_contraction(
     X_init,
     adj_init,
     binary_segmentation=None,
@@ -558,26 +558,51 @@ def laplacian_graph_contraction_edt(
         A = (w_L**2) * L_squared + W_H_sq
         B = W_H_sq.dot(X)
 
+        # Select solver between LU, AMGCG, and CG, check solver only once entirely.
+        check_solver = True
+
+        if solver == 'AMGCG' and check_solver:
+            # Prepare fallback to CG if AMGCG cannot run due to too many voxels.
+            try:
+                import pyamg
+            except ImportError:
+                print(
+                    '!!! WARNING: AMGCG solver was selected, but pyAMG is not '
+                    'installed. Switching solver to CG. !!!'
+                )
+                solver = 'CG'
+
+            if A.indptr.dtype == np.int64 or A.indices.dtype == np.int64:
+                max_idx = max(A.shape[0], A.nnz)
+                if max_idx <= np.iinfo(np.int32).max:
+                    A = A.copy()
+                    A.indptr = A.indptr.astype(np.int32)
+                    A.indices = A.indices.astype(np.int32)
+                    print('!!! WARNING: downcasting A indexes to int32 to use pyAMG')
+                else:
+                    # NNZ or shape exceeds int32 max limit (pyAMG C++ extensions will fail)
+                    print(
+                        '!!! WARNING: AMGCG solver was selected, but A has too many '
+                        'non-zero voxels or rows. Switching solver to CG for this '
+                        'segment. !!!'
+                    )
+                    solver = 'CG'
+
         if solver == 'LU':
             X_next = np.zeros_like(X)
             for dim in range(3):
                 X_next[:, dim] = spsolve(A, B[:, dim])
 
         elif solver == 'AMGCG':
-            import pyamg
-
             ml = pyamg.ruge_stuben_solver(A)
             M = ml.aspreconditioner(cycle='V')
 
             X_next = np.zeros_like(X)
             for dim in range(3):
-                sol, info = cg(A, B[:, dim], x0=X[:, dim], M=M, rtol=1e-4, maxiter=100)
+                sol, info = cg(A, B[:, dim], x0=X[:, dim], M=M, rtol=1e-4, maxiter=500)
                 X_next[:, dim] = sol
 
         elif solver == 'CG':
-            A = (w_L**2) * L_squared + W_H_sq
-            B = W_H_sq.dot(X)
-
             X_next = np.zeros_like(X)
             for dim in range(3):
                 # Use CG with the previous coordinate array as a warm start (x0)
@@ -735,7 +760,7 @@ def _process_single_label(
     tree = KDTree(X_init_local)
 
     # Skip small noise components
-    if len(X_init_local) < 3:
+    if len(X_init_local) <= 3:
         adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
         X_init_global = X_init_local + np.array(offset_origin, dtype=np.float32)
@@ -749,7 +774,7 @@ def _process_single_label(
     adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
     # Run contraction on this label's component mask
-    label_X_local, label_adj = laplacian_graph_contraction_edt(
+    label_X_local, label_adj = laplacian_graph_contraction(
         X_init_local,
         adj_sparse,
         binary_segmentation=cropped_label,
