@@ -1,3 +1,15 @@
+# 1.0.0 (Sat Aug 01 2026)
+
+#### 💥 Breaking Change during development
+
+- Performance optimization and new options [#5](https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/5) ([@smoia](https://github.com/smoia))
+
+#### Authors: 1
+
+- Stefano Moia ([@smoia](https://github.com/smoia))
+
+---
+
 # 0.4.0 (Tue Jul 28 2026)
 
 #### 🚀 Enhancement
