@@ -8,9 +8,37 @@ import numpy as np
 from joblib import delayed
 from nigsp import io
 from scipy import ndimage, sparse
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import cg, spsolve
 from scipy.spatial import KDTree
 from tqdm_joblib import ParallelPbar
+
+VALID_CONNECTIVITY = (6, 18, 26)
+VALID_SOLVER = ('LU', 'CG', 'AMGCG')
+
+
+class UnionFind:
+    """Disjoint-set data structure with path compression for O(1) edge collapses."""
+
+    def __init__(self, n):
+        self.parent = np.arange(n)
+
+    def find(self, i):
+        # Path compression: update parent pointers recursively
+        path = []
+        while self.parent[i] != i:
+            path.append(i)
+            i = self.parent[i]
+        for node in path:
+            self.parent[node] = i
+        return i
+
+    def union(self, i, j):
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            self.parent[root_j] = root_i
+            return True, root_i, root_j
+        return False, root_i, root_j
 
 
 def _get_parser():
@@ -102,14 +130,14 @@ def _get_parser():
         '--decimate_every',
         dest='decimate_every',
         type=int,
-        default=2,
+        default=1,
         help='Decimate nodes every N steps [Default=2].',
     )
     optional.add_argument(
         '--dec_grid_size',
         dest='min_edge_length',
         type=float,
-        default=0.5,
+        default=0.01,
         help=(
             'The Euclidean spatial threshold criteria below which two connected nodes '
             'undergo structural merging, i.e. the isotropic voxel size of the grid used'
@@ -136,9 +164,23 @@ def _get_parser():
     optional.add_argument(
         '--label_connectivity',
         type=int,
-        choices=[6, 18, 26],
+        choices=VALID_CONNECTIVITY,
         default=6,
         help='Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].',
+    )
+    optional.add_argument(
+        '--solver',
+        type=str,
+        choices=VALID_SOLVER,
+        default='CG',
+        help=(
+            'The solver to use to solve the linear system in computing the new '
+            'coordinates system. LU uses SuperLU, a direct solver, CG uses Conjugate '
+            'Gradient (iterative solver), better for memory performance on big data, '
+            'AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before '
+            'running CG, far faster (but may be a bit more memory demanding than pure '
+            'CG). Default is AMGCG.'
+        ),
     )
     optional.add_argument(
         '--n_jobs',
@@ -215,24 +257,53 @@ def compute_laplacian_matrix(
 
     if use_anisotropic:
         # Estimate local structural tangents using local neighborhood PCA proxy
-        tangents = np.zeros_like(X)
-        for i in range(n_vertices):
-            neighbors = cols[rows == i]
-            if len(neighbors) > 1:
-                cov = np.cov(X[neighbors].T)
-                eigvals, eigvecs = np.linalg.eigh(cov)
-                tangents[i] = eigvecs[:, -1]  # Principal directional eigenvector
-            else:
-                tangents[i] = np.array([1.0, 0.0, 0.0])
+        degrees = np.bincount(rows, minlength=n_vertices)
 
+        # Compute neighbor means for all vertices via sparse matrix multiplication
+        # shape: (N, 3)
+        neighbor_sums = adjacency_matrix.dot(X)
+        safe_degrees = np.maximum(degrees[:, None], 1)
+        neighbor_means = neighbor_sums / safe_degrees
+
+        # Compute neighbor deviations from neighbor means per edge
+        # shape: (E, 3)
+        devs = X[cols] - neighbor_means[rows]
+
+        # Assemble (N, 3, 3) covariance tensor using vectorized bincount
+        cov_tensor = np.zeros((n_vertices, 3, 3), dtype=X.dtype)
+
+        # 6 unique terms in a symmetric 3x3 matrix
+        pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
+        denom = np.maximum(degrees - 1, 1)[:, None]
+
+        for r, c in pairs:
+            # Aggregate outer products per vertex
+            cov_val = np.bincount(
+                rows, weights=devs[:, r] * devs[:, c], minlength=n_vertices
+            )
+            cov_tensor[:, r, c] = cov_val
+            if r != c:
+                cov_tensor[:, c, r] = cov_val  # Symmetric fill
+
+        cov_tensor /= denom[:, :, None]
+
+        # Vectorized eigenvalue decomposition on tensor of shape (N, 3, 3)
+        # eigvecs has shape (N, 3, 3); last column is the principal eigenvector
+        eigvals, eigvecs = np.linalg.eigh(cov_tensor)
+        tangents = eigvecs[:, :, -1]
+
+        # Fallback for isolated vertices/single neighbors: default to [1, 0, 0]
+        fallback_mask = degrees <= 1
+        if np.any(fallback_mask):
+            tangents[fallback_mask] = np.array([1.0, 0.0, 0.0])
+
+        # Compute anisotropic components per edge
         t_i = tangents[rows]
         dot_products = np.sum(diffs * t_i, axis=1)
 
-        # Decompose into longitudinal and cross-sectional components
         tangential_comps = np.abs(dot_products)
         normal_comps = np.linalg.norm(diffs - (dot_products[:, None] * t_i), axis=1)
 
-        # Scale the affinity weights using the anisotropy parameters
         aniso_mod = (alpha_norm * normal_comps) + (alpha_tang * tangential_comps)
         weights = aniso_mod / distances
     else:
@@ -244,10 +315,7 @@ def compute_laplacian_matrix(
 
     # Build diagonal degree matrix D
     degree_values = np.array(W.sum(axis=1)).flatten()
-    D = sparse.csr_matrix(
-        (degree_values, (range(n_vertices), range(n_vertices))),
-        shape=(n_vertices, n_vertices),
-    )
+    D = sparse.diags(degree_values, format='csr')
 
     return D - W
 
@@ -283,45 +351,58 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     n_vertices = X.shape[0]
     rows, cols = adjacency_matrix.nonzero()
 
-    # Keep track of which vertices are mapped/merged to which
-    vertex_map = np.arange(n_vertices)
+    # Only process upper triangle of the symmetric matrix (unique undirected edges)
+    edge_mask = rows < cols
+    u_nodes = rows[edge_mask]
+    v_nodes = cols[edge_mask]
 
-    for u, v in zip(rows, cols):
-        if u >= v:
-            continue  # Only check each unique undirected edge once
+    # Calculate Euclidean distances for all unique edges at once
+    edge_dists = np.linalg.norm(X[u_nodes] - X[v_nodes], axis=1)
 
-        # Check if the edge is shorter than the allowed threshold
-        dist = np.linalg.norm(X[u] - X[v])
-        if dist < min_edge_length:
-            root_u = vertex_map[u]
-            root_v = vertex_map[v]
-            if root_u != root_v:
-                # Merge v into u: update positions to their average
-                X[root_u] = (X[root_u] + X[root_v]) / 2.0
-                vertex_map[vertex_map == root_v] = root_u
+    # Filter edges that are shorter than the threshold
+    collapse_mask = edge_dists < min_edge_length
+    short_u = u_nodes[collapse_mask]
+    short_v = v_nodes[collapse_mask]
 
-    # Remap unique remaining vertices
-    unique_verts, inverse_indices = np.unique(vertex_map, return_inverse=True)
-    new_X = X[unique_verts]
+    uf = UnionFind(n_vertices)
 
-    # Rebuild the simplified adjacency matrix
+    # Track merged positions without mutating X during the loop
+    # We maintain running coordinate sums and vertex counts for each root
+    coord_sums = X.copy()
+    node_counts = np.ones(n_vertices, dtype=int)
+
+    for u, v in zip(short_u, short_v):
+        merged, root_u, root_v = uf.union(u, v)
+        if merged:
+            # Accumulate positions into the new combined root
+            coord_sums[root_u] += coord_sums[root_v]
+            node_counts[root_u] += node_counts[root_v]
+
+    # Resolve final root assignments for every vertex
+    final_roots = np.array([uf.find(i) for i in range(n_vertices)])
+
+    # Compute averaged coordinates for each root
+    unique_roots, inverse_indices = np.unique(final_roots, return_inverse=True)
+    new_X = coord_sums[unique_roots] / node_counts[unique_roots][:, None]
+
+    # Rebuild the simplified adjacency matrix using remapped indices
     new_rows = inverse_indices[rows]
     new_cols = inverse_indices[cols]
 
-    # Remove self-loops and duplicates
+    # Remove self-loops
     valid_mask = new_rows != new_cols
     new_rows = new_rows[valid_mask]
     new_cols = new_cols[valid_mask]
 
     new_data = np.ones(len(new_rows), dtype=bool)
     new_adj = sparse.csr_matrix(
-        (new_data, (new_rows, new_cols)), shape=(len(unique_verts), len(unique_verts))
+        (new_data, (new_rows, new_cols)), shape=(len(unique_roots), len(unique_roots))
     )
 
     return new_X, new_adj
 
 
-def laplacian_graph_contraction_edt(
+def laplacian_graph_contraction(
     X_init,
     adj_init,
     binary_segmentation=None,
@@ -334,10 +415,11 @@ def laplacian_graph_contraction_edt(
     delta=0.5,
     max_iter=2000,
     tol=0.05,
-    decimate_every=2,
-    min_edge_length=0.5,
+    decimate_every=1,
+    min_edge_length=0.01,
     alpha_norm=1.5,
     alpha_tang=0.1,
+    solver='CG',
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -379,16 +461,22 @@ def laplacian_graph_contraction_edt(
         Convergence tolerance limit evaluated against mean vertex displacement. Default is 1e-3.
     decimate_every : int, optional
         Frequency cadence interval defining how many contraction loop steps occur before triggering
-        an edge-collapse decimation execution. Default is 2.
+        an edge-collapse decimation execution. Default is 1.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo structural merging.
-        Default is 0.5.
+        Default is 0.01.
     alpha_norm : float, optional
         The normal/cross-sectional penalty parameter used during anisotropic calculation phases.
         Default is 1.5.
     alpha_tang : float, optional
         The tangential/longitudinal orientation penalty parameter used during anisotropic calculation phases.
         Default is 0.1.
+    solver : ['LU', 'CG', 'AMGCG'], string, optional
+        The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
+        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
+        data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
+        running CG, which makes it faster, but may require a tad more memory.
+        Default is CG.
 
     Returns
     -------
@@ -451,10 +539,15 @@ def laplacian_graph_contraction_edt(
         max_pull = ''
 
         if use_edt:
-            ix = np.clip(np.round(X[:, 0]).astype(int), 0, vol_shape[0] - 1)
-            iy = np.clip(np.round(X[:, 1]).astype(int), 0, vol_shape[1] - 1)
-            iz = np.clip(np.round(X[:, 2]).astype(int), 0, vol_shape[2] - 1)
-            node_distances = edt_volume[ix, iy, iz]
+            # Find value of EDT_volume by trilinear interpolation of new coordinates.
+            # map_coordinates expects shape (ndim, N), so pass X.T
+            node_distances = ndimage.map_coordinates(
+                edt_volume, X.T, order=1, mode='nearest'
+            )
+
+            # Prevent divide-by-zero/negative issues from interpolation near boundary
+            node_distances = np.maximum(node_distances, 0.0)
+
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
             W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
             max_pull = f' - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}'
@@ -465,9 +558,57 @@ def laplacian_graph_contraction_edt(
         A = (w_L**2) * L_squared + W_H_sq
         B = W_H_sq.dot(X)
 
-        X_next = np.zeros_like(X)
-        for dim in range(3):
-            X_next[:, dim] = spsolve(A, B[:, dim])
+        # Select solver between LU, AMGCG, and CG, check solver only once entirely.
+        check_solver = True
+
+        if solver == 'AMGCG' and check_solver:
+            # Prepare fallback to CG if AMGCG cannot run due to too many voxels.
+            try:
+                import pyamg
+            except ImportError:
+                print(
+                    '!!! WARNING: AMGCG solver was selected, but pyAMG is not '
+                    'installed. Switching solver to CG. !!!'
+                )
+                solver = 'CG'
+
+            if A.indptr.dtype == np.int64 or A.indices.dtype == np.int64:
+                max_idx = max(A.shape[0], A.nnz)
+                if max_idx <= np.iinfo(np.int32).max:
+                    A = A.copy()
+                    A.indptr = A.indptr.astype(np.int32)
+                    A.indices = A.indices.astype(np.int32)
+                    print('!!! WARNING: downcasting A indexes to int32 to use pyAMG')
+                else:
+                    # NNZ or shape exceeds int32 max limit (pyAMG C++ extensions will fail)
+                    print(
+                        '!!! WARNING: AMGCG solver was selected, but A has too many '
+                        'non-zero voxels or rows. Switching solver to CG for this '
+                        'segment. !!!'
+                    )
+                    solver = 'CG'
+
+        if solver == 'LU':
+            X_next = np.zeros_like(X)
+            for dim in range(3):
+                X_next[:, dim] = spsolve(A, B[:, dim])
+
+        elif solver == 'AMGCG':
+            ml = pyamg.ruge_stuben_solver(A)
+            M = ml.aspreconditioner(cycle='V')
+
+            X_next = np.zeros_like(X)
+            for dim in range(3):
+                sol, info = cg(A, B[:, dim], x0=X[:, dim], M=M, rtol=1e-4, maxiter=500)
+                X_next[:, dim] = sol
+
+        elif solver == 'CG':
+            X_next = np.zeros_like(X)
+            for dim in range(3):
+                # Use CG with the previous coordinate array as a warm start (x0)
+                # tol=1e-4 is plenty accurate for contraction steps
+                sol, info = cg(A, B[:, dim], x0=X[:, dim], rtol=1e-4, maxiter=500)
+                X_next[:, dim] = sol
 
         # 4. Explicit Hard-Voxel Containment Constraint Projection
         if enforce_containment:
@@ -516,38 +657,6 @@ def laplacian_graph_contraction_edt(
     return X, adj
 
 
-def coords_to_dense_3d(X, volume_shape):
-    """
-    Create and fill in a volume using coordinates of points.
-
-    Parameters
-    ----------
-    X : ndarray of shape (N, 3)
-        The 3D coordinates of the areas with content.
-    volume_shape : tuple of int (D, H, W)
-        The structural grid dimensions of the target 3D matrix.
-
-    Returns
-    -------
-    dense_volume : ndarray of shape (D, H, W)
-        A binary 3D array where 1 represents the skeleton path.
-    """
-    # 1. Initialize empty dense matrix
-    dense_volume = np.zeros(volume_shape, dtype=bool)
-
-    coords = np.rint(X).astype(np.int8)
-
-    # 2. Fix coordinates on boundaries due to numpy's round-to-even
-    for dim, bound in enumerate(volume_shape):
-        coords[:, dim][coords[:, dim] == bound] = bound - 1
-
-    # 3. Rasterize edges and nodes into the grid
-    for i in coords:
-        dense_volume[tuple(i)] = True
-
-    return dense_volume
-
-
 def compute_sparse_adjacency_matrix(tree, max_distance=2.4999):
     """
     Compute sparse adjacency matrix.
@@ -575,7 +684,8 @@ def compute_sparse_adjacency_matrix(tree, max_distance=2.4999):
 
 def _process_single_label(
     label_id,
-    labeled_volume,
+    cropped_label,
+    offset_origin,
     use_edt,
     use_anisotropic,
     enforce_containment,
@@ -587,6 +697,7 @@ def _process_single_label(
     decimate_every,
     min_edge_length,
     num_features,
+    solver,
 ):
     """
     Worker function to process a single connected component label.
@@ -595,8 +706,10 @@ def _process_single_label(
     ----------
     label_id : int
         ID of current label
-    labeled_volume : np.ndarray
-        Segmentation labelled with scipy's label.
+    cropped_label : np.ndarray
+        Segmentation labelled with scipy's label and cropped with find_objects.
+    offset_origin : list
+        cropped offset.
     use_edt : bool
         Enables boundary tracking potential constraints using Euclidean Distance Transforms.
     use_anisotropic : bool
@@ -627,6 +740,11 @@ def _process_single_label(
         decimation.
     num_features : int
         Number of extracted labels.
+    solver : ['LU', 'CG', 'AMGCG'], string, optional
+        The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
+        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
+        data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
+        running CG, which makes it far faster, but may require a tad more memory.
 
     Returns
     -------
@@ -637,28 +755,28 @@ def _process_single_label(
     final_adj : scipy.sparse.csr_matrix
         The resulting graph sparse adjacency connectivity representation of shape (M, M).
     """
-    segment = labeled_volume == label_id
-    X_init = np.argwhere(segment).astype(float)
-    tree = KDTree(X_init)
+    X_init_local = np.argwhere(cropped_label).astype(np.uint16)
+    tree = KDTree(X_init_local)
 
     # Skip small noise components
-    if len(X_init) < 3:
+    if len(X_init_local) <= 3:
         adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
-        return label_id, X_init, adj_sparse
+        X_init_global = X_init_local + np.array(offset_origin, dtype=np.float32)
+        return label_id, X_init_global, adj_sparse
 
     print(
-        f'\n--- Processing Label {label_id}/{num_features} ({X_init.sum()} voxels) ---'
+        f'\n--- Processing Label {label_id}/{num_features} ({X_init_local.sum()} voxels) ---'
     )
 
     print('Computing proximity network coordinates...')
     adj_sparse = compute_sparse_adjacency_matrix(tree, max_distance)
 
     # Run contraction on this label's component mask
-    label_X, label_adj = laplacian_graph_contraction_edt(
-        X_init,
+    label_X_local, label_adj = laplacian_graph_contraction(
+        X_init_local,
         adj_sparse,
-        binary_segmentation=segment,
+        binary_segmentation=cropped_label,
         use_edt=use_edt,
         use_anisotropic=use_anisotropic,
         enforce_containment=enforce_containment,
@@ -668,12 +786,15 @@ def _process_single_label(
         tol=tol,
         decimate_every=decimate_every,
         min_edge_length=min_edge_length,
+        solver=solver,
     )
 
-    return label_id, label_X, label_adj
+    label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
+
+    return label_id, label_X_global, label_adj
 
 
-def label_and_sort(binary_mask, label_connectivity=6):
+def label_and_sort_by_size(binary_mask, label_connectivity=6):
     """
     Label connected components and re-order by size in reverse round-robin fashion.
 
@@ -715,36 +836,50 @@ def label_and_sort(binary_mask, label_connectivity=6):
     if num_features == 0:
         return labeled_volume, 0
 
-    # Voxel count for each label (index 0 = background)
-    counts = np.bincount(labeled_volume.ravel(), minlength=num_features + 1)
+    sizes = ndimage.sum(
+        binary_mask,
+        labeled_volume,
+        index=np.arange(1, num_features + 1, dtype=np.int32),
+    )
+    # Sort descending
+    sorted_labels = np.argsort(sizes)[::-1] + 1
 
-    # Separate label IDs (1 to num_features) into main vs. small (< 4 voxels)
-    all_labels = np.arange(1, num_features + 1)
-    main_mask = counts[1:] >= 4
-
-    main_labels = all_labels[main_mask]
-    small_labels = all_labels[~main_mask]
-
-    # Sort main labels by size descending (largest first)
-    main_counts = counts[main_labels]
-    sorted_main_indices = np.argsort(main_counts)[::-1]
-    sorted_main = main_labels[sorted_main_indices]
-
-    # Split sorted main labels into odd and even ranks
-    odds = sorted_main[0::2]
-    evens = sorted_main[1::2]
-
-    # Re-order: odds forward + evens reversed
-    interleaved_main = np.concatenate([odds, evens[::-1]])
-
-    # Final label order: custom main components followed by small components
-    final_ordered_labels = np.concatenate([interleaved_main, small_labels])
-
-    # Map old label IDs to new 1..num_features IDs
     mapping = np.zeros(num_features + 1, dtype=labeled_volume.dtype)
-    mapping[final_ordered_labels] = np.arange(1, len(final_ordered_labels) + 1)
+    mapping[sorted_labels] = np.arange(1, num_features + 1, dtype=labeled_volume.dtype)
 
     return mapping[labeled_volume], num_features
+
+
+def coords_to_dense_3d(X, volume_shape):
+    """
+    Create and fill in a volume using coordinates of points.
+
+    Parameters
+    ----------
+    X : ndarray of shape (N, 3)
+        The 3D coordinates of the areas with content.
+    volume_shape : tuple of int (D, H, W)
+        The structural grid dimensions of the target 3D matrix.
+
+    Returns
+    -------
+    dense_volume : ndarray of shape (D, H, W)
+        A binary 3D array where 1 represents the skeleton path.
+    """
+    # 1. Initialize empty dense matrix
+    dense_volume = np.zeros(volume_shape, dtype=bool)
+
+    coords = np.rint(X).astype(np.int8)
+
+    # 2. Fix coordinates on boundaries due to numpy's round-to-even
+    for dim, bound in enumerate(volume_shape):
+        coords[:, dim][coords[:, dim] == bound] = bound - 1
+
+    # 3. Rasterize edges and nodes into the grid
+    for i in coords:
+        dense_volume[tuple(i)] = True
+
+    return dense_volume
 
 
 def laplacian_skeletonisation(
@@ -757,12 +892,13 @@ def laplacian_skeletonisation(
     w_L=0.5,
     w_H_base=0.5,
     tol=0.05,
-    decimate_every=2,
-    min_edge_length=0.5,
+    decimate_every=1,
+    min_edge_length=0.01,
     downsample=False,
     seed=42,
     separate_streams=False,
     label_connectivity=6,
+    solver='CG',
     max_distance=2.4999,
     n_jobs=None,
 ):
@@ -800,11 +936,11 @@ def laplacian_skeletonisation(
         This should be the equivalent of gamma in Damseh 2021 (not sure). Default is 0.05.
     decimate_every : int, optional
         Frequency cadence interval defining how many contraction loop steps occur before
-        triggering an edge-collapse decimation execution. Default is 2.
+        triggering an edge-collapse decimation execution. Default is 1.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo
         structural merging, i.e. the isotropic voxel size of the grid used for
-        decimation. Default is 0.5.
+        decimation. Default is 0.01.
     downsample : bool, optional
         Flag setting whether point arrays containing high density are uniformly downsampled
         to stay within safe RAM footprints. Default is False.
@@ -814,6 +950,12 @@ def laplacian_skeletonisation(
         Process each "independent" vessel by itself (i.e. non-connected segment)
     label_connectivity : 6, 18, 26, optional
         Connectivity profile to use to separate streams - 6, 18, or 26 edges.
+    solver : ['LU', 'CG', 'AMGCG'], string, optional
+        The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
+        solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
+        data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
+        running CG, which makes it far faster, but may require a tad more memory.
+        Default is CG.
     max_distance : float
         Maximum distance to consider when making the sparse adjacency matrix.
     n_jobs : None, optional
@@ -843,7 +985,7 @@ def laplacian_skeletonisation(
     # Downsample points cloud initialization limits if necessary to guard RAM bounds
     if downsample and np.any(volume_data) > 200000:
         print(f'Volume contains {np.any(volume_data)} points. Downsampling.')
-        vessel_voxels = np.argwhere(volume_data).astype(float)
+        vessel_voxels = np.argwhere(volume_data).astype(np.uint16)
         rng = np.random.default_rng(seed=seed)
         idx = rng.choice(len(vessel_voxels), 150000, replace=False)
         vessel_voxels = vessel_voxels[idx]
@@ -851,7 +993,9 @@ def laplacian_skeletonisation(
 
     # Process each component independently if separate_streams is True
     if separate_streams:
-        labeled_volume, num_features = label_and_sort(volume_data, label_connectivity)
+        labeled_volume, num_features = label_and_sort_by_size(
+            volume_data, label_connectivity
+        )
     else:
         labeled_volume, num_features = volume_data * 1, 1
 
@@ -866,24 +1010,47 @@ def laplacian_skeletonisation(
         f'on {total_cores} CPU cores detected.'
     )
 
-    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(
-        delayed(_process_single_label)(
-            label_id,
-            labeled_volume,
-            use_edt,
-            use_anisotropic,
-            enforce_containment,
-            beta_edt,
-            w_L,
-            w_H_base,
-            tol,
-            max_distance,
-            decimate_every,
-            min_edge_length,
-            num_features,
+    slices_list = ndimage.find_objects(labeled_volume)
+
+    tasks = []
+    for label_id in range(1, num_features + 1):
+        bbox_slice = slices_list[label_id - 1]
+
+        if bbox_slice is None:
+            continue
+
+        # Extract cropped boolean mask for ONLY this label
+        cropped_label = labeled_volume[bbox_slice] == label_id
+
+        # Offset origin (min_x, min_y, min_z) used to map back to original volume
+        offset_origin = (
+            bbox_slice[0].start,
+            bbox_slice[1].start,
+            bbox_slice[2].start,
         )
-        for label_id in range(1, num_features + 1)
-    )
+
+        tasks.append(
+            delayed(_process_single_label)(
+                label_id,
+                cropped_label,
+                offset_origin,
+                use_edt,
+                use_anisotropic,
+                enforce_containment,
+                beta_edt,
+                w_L,
+                w_H_base,
+                tol,
+                max_distance,
+                decimate_every,
+                min_edge_length,
+                num_features,
+                solver,
+            )
+        )
+
+    # 2. Run workers in parallel
+    results = ParallelPbar('Skeletonising')(n_jobs=n_workers, batch_size=1)(tasks)
 
     print('Reuniting results from parallel jobs.')
 
