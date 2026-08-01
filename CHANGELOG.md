@@ -1,3 +1,15 @@
+# 0.5.1 (Sat Aug 01 2026)
+
+#### 🐛 Bug Fix
+
+- fix: Install pyamg ([@smoia](https://github.com/smoia))
+
+#### Authors: 1
+
+- Stefano Moia ([@smoia](https://github.com/smoia))
+
+---
+
 # 1.0.0 (Sat Aug 01 2026)
 
 #### 💥 Breaking Change during development
