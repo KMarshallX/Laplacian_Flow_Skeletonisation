@@ -1050,7 +1050,7 @@ def laplacian_skeletonisation(
         )
 
     # 2. Run workers in parallel
-    results = ParallelPbar('Skeletonising')(n_jobs=n_workers)(tasks)
+    results = ParallelPbar('Skeletonising')(n_jobs=n_workers, batch_size=1)(tasks)
 
     print('Reuniting results from parallel jobs.')
 
