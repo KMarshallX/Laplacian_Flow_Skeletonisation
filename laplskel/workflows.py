@@ -7,7 +7,7 @@ from nigsp import io
 from scipy import sparse
 
 from .parallelisation import process_components
-from .utils import coords_to_dense_3d, label_and_sort_by_size
+from .utils import coords_to_dense_3d, label_and_sort_by_size, write_graphml
 
 
 def laplacian_skeletonisation(
@@ -29,6 +29,7 @@ def laplacian_skeletonisation(
     solver='CG',
     max_distance=2.4999,
     n_jobs=None,
+    graphml=False,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -89,6 +90,9 @@ def laplacian_skeletonisation(
     n_jobs : None, optional
         Number of parallel jobs. If not set or <=0, defaults to ~30%% of available CPU
         cores.
+    graphml : bool, optional
+        Write the converged graph as GraphML instead of coordinate and adjacency
+        NPZ files. The dense NIfTI skeleton is still written. Default is False.
 
     Returns
     -------
@@ -160,8 +164,21 @@ def laplacian_skeletonisation(
     )
 
     print(f'\nSaving structural centerline data matrices to: {out_path}')
-    np.savez_compressed(f'{out_path}_coords.npz', contracted_X=contracted_X)
-    sparse.save_npz(f'{out_path}.npz', final_adj)
+    if graphml:
+        component_labels = np.concatenate(
+            [np.full(res[1].shape[0], res[0], dtype=int) for res in results]
+        )
+        write_graphml(
+            contracted_X,
+            final_adj,
+            component_labels=component_labels,
+            affine=img.affine,
+            volume_shape=volume_data.shape,
+            output_path=f'{out_path}.graphml',
+        )
+    else:
+        np.savez_compressed(f'{out_path}_coords.npz', contracted_X=contracted_X)
+        sparse.save_npz(f'{out_path}.npz', final_adj)
     nifti_skel = coords_to_dense_3d(contracted_X, volume_data.shape)
 
     # If enforce containment was used, assume no loss of tracts masking with original segmentation.
