@@ -35,9 +35,9 @@ def _process_single_label(
     label_id : int
         ID of current label
     cropped_label : np.ndarray
-        Segmentation labelled with scipy's label and cropped with find_objects.
-    offset_origin : list
-        cropped offset.
+        Boolean component mask with a one-voxel background halo.
+    offset_origin : tuple
+        Global-volume origin corresponding to local crop coordinate zero.
     use_edt : bool
         Enables boundary tracking potential constraints using Euclidean Distance Transforms.
     use_anisotropic : bool
@@ -122,6 +122,14 @@ def _process_single_label(
     return label_id, label_X_global, label_adj
 
 
+def _padded_component_crop(labeled_volume, label_id, bounding_box):
+    """Return one tightly cropped component with a one-voxel background halo."""
+    component = labeled_volume[bounding_box] == label_id
+    padded_component = np.pad(component, 1, mode='constant', constant_values=False)
+    offset_origin = tuple(axis.start - 1 for axis in bounding_box)
+    return padded_component, offset_origin
+
+
 def process_components(
     labeled_volume,
     num_features,
@@ -159,14 +167,8 @@ def process_components(
         if bbox_slice is None:
             continue
 
-        # Extract cropped boolean mask for ONLY this label
-        cropped_label = labeled_volume[bbox_slice] == label_id
-
-        # Offset origin (min_x, min_y, min_z) used to map back to original volume
-        offset_origin = (
-            bbox_slice[0].start,
-            bbox_slice[1].start,
-            bbox_slice[2].start,
+        cropped_label, offset_origin = _padded_component_crop(
+            labeled_volume, label_id, bbox_slice
         )
 
         tasks.append(

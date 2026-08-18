@@ -1,5 +1,7 @@
 """Laplacian graph contraction algorithm."""
 
+import warnings
+
 import numpy as np
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import cg, spsolve
@@ -221,7 +223,7 @@ def laplacian_graph_contraction(
             alpha_norm=alpha_norm,
             alpha_tang=alpha_tang,
         )
-        L_squared = L.dot(L)
+        L_squared = L.T.dot(L)
 
         # 2. Extract localized retention matrix mapping
         max_pull = ''
@@ -246,35 +248,49 @@ def laplacian_graph_contraction(
         A = (w_L**2) * L_squared + W_H_sq
         B = W_H_sq.dot(X)
 
-        # Select solver between LU, AMGCG, and CG, check solver only once entirely.
-        check_solver = True
-
-        if solver == 'AMGCG' and check_solver:
+        # Select solver between LU, AMGCG, and CG.
+        if solver == 'AMGCG':
             # Prepare fallback to CG if AMGCG cannot run due to too many voxels.
             try:
                 import pyamg
             except ImportError:
-                print(
-                    '!!! WARNING: AMGCG solver was selected, but pyAMG is not '
-                    'installed. Switching solver to CG. !!!'
+                warnings.warn(
+                    'PyAMG is unavailable; switching to CG.',
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
                 solver = 'CG'
 
-            if A.indptr.dtype == np.int64 or A.indices.dtype == np.int64:
+            if solver == 'AMGCG' and (
+                A.indptr.dtype == np.int64 or A.indices.dtype == np.int64
+            ):
                 max_idx = max(A.shape[0], A.nnz)
                 if max_idx <= np.iinfo(np.int32).max:
                     A = A.copy()
                     A.indptr = A.indptr.astype(np.int32)
                     A.indices = A.indices.astype(np.int32)
-                    print('!!! WARNING: downcasting A indexes to int32 to use pyAMG')
                 else:
                     # NNZ or shape exceeds int32 max limit (pyAMG C++ extensions will fail)
-                    print(
-                        '!!! WARNING: AMGCG solver was selected, but A has too many '
-                        'non-zero voxels or rows. Switching solver to CG for this '
-                        'segment. !!!'
+                    warnings.warn(
+                        'AMGCG does not support this matrix index range; switching '
+                        'to CG.',
+                        RuntimeWarning,
+                        stacklevel=2,
                     )
                     solver = 'CG'
+
+        preconditioner = None
+        if solver == 'AMGCG':
+            try:
+                hierarchy = pyamg.ruge_stuben_solver(A)
+                preconditioner = hierarchy.aspreconditioner(cycle='V')
+            except (MemoryError, RuntimeError, TypeError, ValueError) as error:
+                warnings.warn(
+                    f'AMGCG setup failed ({error}); switching to CG.',
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                solver = 'CG'
 
         if solver == 'LU':
             X_next = np.zeros_like(X)
@@ -282,12 +298,16 @@ def laplacian_graph_contraction(
                 X_next[:, dim] = spsolve(A, B[:, dim])
 
         elif solver == 'AMGCG':
-            ml = pyamg.ruge_stuben_solver(A)
-            M = ml.aspreconditioner(cycle='V')
-
             X_next = np.zeros_like(X)
             for dim in range(3):
-                sol, info = cg(A, B[:, dim], x0=X[:, dim], M=M, rtol=1e-4, maxiter=500)
+                sol, info = cg(
+                    A,
+                    B[:, dim],
+                    x0=X[:, dim],
+                    M=preconditioner,
+                    rtol=1e-4,
+                    maxiter=500,
+                )
                 X_next[:, dim] = sol
 
         elif solver == 'CG':
@@ -300,13 +320,18 @@ def laplacian_graph_contraction(
 
         # 4. Explicit Hard-Voxel Containment Constraint Projection
         if enforce_containment:
-            # Re-discretize positions to evaluate mask containment state
-            ix_next = np.clip(np.round(X_next[:, 0]).astype(int), 0, vol_shape[0] - 1)
-            iy_next = np.clip(np.round(X_next[:, 1]).astype(int), 0, vol_shape[1] - 1)
-            iz_next = np.clip(np.round(X_next[:, 2]).astype(int), 0, vol_shape[2] - 1)
+            # Record out-of-bounds positions before clipping for safe array lookup.
+            voxel_positions = np.rint(X_next).astype(np.intp)
+            volume_bounds = np.asarray(vol_shape)
+            out_of_bounds = np.any(
+                (voxel_positions < 0) | (voxel_positions >= volume_bounds), axis=1
+            )
+            lookup_positions = np.clip(voxel_positions, 0, volume_bounds - 1)
+            ix_next, iy_next, iz_next = lookup_positions.T
 
-            # Find points that fell outside the vessel grid (mask == 0)
-            escaped_mask = binary_segmentation[ix_next, iy_next, iz_next] == 0
+            escaped_mask = out_of_bounds | (
+                binary_segmentation[ix_next, iy_next, iz_next] == 0
+            )
             escaped_count = np.sum(escaped_mask)
 
             if escaped_count > 0:
