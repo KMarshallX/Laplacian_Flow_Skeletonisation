@@ -63,7 +63,9 @@ def _get_parser():
         '--use_anisotropic',
         action='store_true',
         help=(
-            'Flag to disable anisotropic constraints and fall back to standard '
+            'Flag to enable Laplacian weighting, '
+            'favoring cross-sectional contraction while reducing longitudinal contraction.'
+            'Omitting this flag will disable anisotropic constraints and fall back to standard '
             'isotropic Laplacian matrix operations.'
         ),
     )
