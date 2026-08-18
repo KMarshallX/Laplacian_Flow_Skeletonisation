@@ -221,7 +221,7 @@ def laplacian_graph_contraction(
             alpha_norm=alpha_norm,
             alpha_tang=alpha_tang,
         )
-        L_squared = L.dot(L)
+        L_squared = L.T.dot(L)
 
         # 2. Extract localized retention matrix mapping
         max_pull = ''
