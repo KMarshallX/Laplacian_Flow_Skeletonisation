@@ -9,6 +9,17 @@ VALID_CONNECTIVITY = (6, 18, 26)
 VALID_SOLVER = ('LU', 'CG', 'AMGCG')
 
 
+def _positive_integer(value):
+    """Parse a strictly positive integer argument."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError('must be a positive integer') from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return parsed
+
+
 def _get_parser():
     """
     Parse command line inputs for this function.
@@ -124,12 +135,22 @@ def _get_parser():
         ),
     )
     optional.add_argument(
-        '--max_distance_adjmat',
-        dest='max_distance',
-        type=float,
-        default=2.4999,
+        '--init_graph_adj',
+        type=int,
+        choices=VALID_CONNECTIVITY,
+        default=26,
         help=(
-            'Maximum distance to consider when computing the sparse adjacency matrix.'
+            'Voxel-neighborhood connectivity for the initial graph (6, 18, or 26) '
+            '[Default=26].'
+        ),
+    )
+    optional.add_argument(
+        '--local_pca_hops',
+        type=_positive_integer,
+        default=1,
+        help=(
+            'Number of graph hops used for each local tangent PCA neighborhood '
+            '[Default=1].'
         ),
     )
     optional.add_argument(

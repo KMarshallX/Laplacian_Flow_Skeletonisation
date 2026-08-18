@@ -109,6 +109,7 @@ def laplacian_graph_contraction(
     min_edge_length=0.01,
     alpha_norm=1.5,
     alpha_tang=0.1,
+    local_pca_hops=1,
     solver='CG',
 ):
     """
@@ -161,6 +162,9 @@ def laplacian_graph_contraction(
     alpha_tang : float, optional
         The tangential/longitudinal orientation penalty parameter used during anisotropic calculation phases.
         Default is 0.1.
+    local_pca_hops : int, optional
+        Number of graph hops included in each node's neighborhood when estimating
+        local tangent directions. Default is 1.
     solver : ['LU', 'CG', 'AMGCG'], string, optional
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
@@ -222,6 +226,7 @@ def laplacian_graph_contraction(
             use_anisotropic=use_anisotropic,
             alpha_norm=alpha_norm,
             alpha_tang=alpha_tang,
+            local_pca_hops=local_pca_hops,
         )
         L_squared = L.T.dot(L)
 

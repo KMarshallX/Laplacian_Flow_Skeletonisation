@@ -26,8 +26,9 @@ def laplacian_skeletonisation(
     seed=42,
     separate_streams=False,
     label_connectivity=6,
+    init_graph_adj=26,
+    local_pca_hops=1,
     solver='CG',
-    max_distance=2.4999,
     n_jobs=None,
     graphml=False,
 ):
@@ -79,14 +80,18 @@ def laplacian_skeletonisation(
         Process each "independent" vessel by itself (i.e. non-connected segment)
     label_connectivity : 6, 18, 26, optional
         Connectivity profile to use to separate streams - 6, 18, or 26 edges.
+    init_graph_adj : {6, 18, 26}, int, optional
+        Voxel-neighborhood connectivity used to construct the initial graph.
+        Default is 26.
+    local_pca_hops : int, optional
+        Number of graph hops included in each node's neighborhood when estimating
+        local tangent directions. Default is 1.
     solver : ['LU', 'CG', 'AMGCG'], string, optional
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
         data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
         running CG, which makes it far faster, but may require a tad more memory.
         Default is CG.
-    max_distance : float
-        Maximum distance to consider when making the sparse adjacency matrix.
     n_jobs : None, optional
         Number of parallel jobs. If not set or <=0, defaults to ~30%% of available CPU
         cores.
@@ -141,7 +146,8 @@ def laplacian_skeletonisation(
         w_L,
         w_H_base,
         tol,
-        max_distance,
+        init_graph_adj,
+        local_pca_hops,
         decimate_every,
         min_edge_length,
         n_jobs,
