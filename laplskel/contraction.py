@@ -7,15 +7,23 @@ from scipy import ndimage, sparse
 from scipy.sparse.linalg import cg, spsolve
 
 from .graph import compute_laplacian_matrix
+from .medial import compute_medialness
 from .objects import UnionFind
 
 
-def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
+def edge_collapse_decimation(
+    X, adjacency_matrix, min_edge_length, medialness=None, w_H_medial=1.0
+):
     """
     Perform structural decimation (E-collapse).
 
     Merges vertices connected by edges shorter than min_edge_length to maintain
     clean topology and prevent node crowding during graph contraction.
+
+    When medialness scores are supplied, merged coordinates are averaged with
+    medial weighting so the surviving vertex is drawn toward the most medial of its
+    members rather than to their unweighted centroid, and the surviving vertex
+    inherits the highest score among them.
 
     Parameters
     ----------
@@ -28,6 +36,12 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     min_edge_length : float
         The structural distance threshold. Any edge with a Euclidean length shorter
         than this value will be collapsed.
+    medialness : numpy.ndarray, optional
+        An (N,) array of medialness scores in [0, 1] used to weight merged coordinates.
+        Default is None, which averages merged coordinates uniformly.
+    w_H_medial : float, optional
+        The medial retention boost whose profile also weights merged coordinates.
+        A value of 1.0 reproduces uniform averaging exactly. Default is 1.0.
 
     Returns
     -------
@@ -37,6 +51,9 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
     new_adj : scipy.sparse.csr_matrix
         A simplified sparse CSR adjacency matrix of shape (M, M) with self-loops
         and duplicate edges removed.
+    new_medialness : numpy.ndarray or None
+        An (M,) array of inherited medialness scores, or None when `medialness`
+        was not supplied.
     """
     n_vertices = X.shape[0]
     rows, cols = adjacency_matrix.nonzero()
@@ -56,24 +73,38 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
 
     uf = UnionFind(n_vertices)
 
+    # Medial vertices carry more weight into a merge, so the surviving position sits
+    # nearer the inscribed-sphere centre instead of the plain centroid. Unit boost
+    # leaves every weight at one, which is exactly uniform averaging.
+    if medialness is None:
+        merge_weights = np.ones(n_vertices, dtype=float)
+    else:
+        merge_weights = float(w_H_medial) ** np.asarray(medialness, dtype=float)
+
     # Track merged positions without mutating X during the loop
-    # We maintain running coordinate sums and vertex counts for each root
-    coord_sums = X.copy()
-    node_counts = np.ones(n_vertices, dtype=int)
+    # We maintain running coordinate sums and vertex weights for each root
+    coord_sums = X * merge_weights[:, None]
+    weight_sums = merge_weights.copy()
 
     for u, v in zip(short_u, short_v):
         merged, root_u, root_v = uf.union(u, v)
         if merged:
             # Accumulate positions into the new combined root
             coord_sums[root_u] += coord_sums[root_v]
-            node_counts[root_u] += node_counts[root_v]
+            weight_sums[root_u] += weight_sums[root_v]
 
     # Resolve final root assignments for every vertex
     final_roots = np.array([uf.find(i) for i in range(n_vertices)])
 
     # Compute averaged coordinates for each root
     unique_roots, inverse_indices = np.unique(final_roots, return_inverse=True)
-    new_X = coord_sums[unique_roots] / node_counts[unique_roots][:, None]
+    new_X = coord_sums[unique_roots] / weight_sums[unique_roots][:, None]
+
+    # Each surviving vertex keeps the highest medialness among its merged members
+    new_medialness = None
+    if medialness is not None:
+        new_medialness = np.zeros(len(unique_roots), dtype=float)
+        np.maximum.at(new_medialness, inverse_indices, medialness)
 
     # Rebuild the simplified adjacency matrix using remapped indices
     new_rows = inverse_indices[rows]
@@ -89,7 +120,7 @@ def edge_collapse_decimation(X, adjacency_matrix, min_edge_length):
         (new_data, (new_rows, new_cols)), shape=(len(unique_roots), len(unique_roots))
     )
 
-    return new_X, new_adj
+    return new_X, new_adj, new_medialness
 
 
 def laplacian_graph_contraction(
@@ -101,6 +132,7 @@ def laplacian_graph_contraction(
     enforce_containment=False,
     w_L=0.5,
     w_H_base=0.5,
+    w_H_medial=1.0,
     beta_edt=1.0,
     delta=0.5,
     max_iter=2000,
@@ -140,6 +172,13 @@ def laplacian_graph_contraction(
         Default is 0.5.
     w_H_base : float, optional
         The baseline structural positional anchor retention weight coefficient. Default is 0.5.
+    w_H_medial : float, optional
+        Multiplicative retention boost applied to nodes at or around inscribed-sphere
+        centres, stacked on top of the baseline and EDT weights. The boost is raised to
+        the power of each node's medialness score, so fully medial nodes receive the
+        whole factor while boundary nodes receive none. A value of 1.0 disables the
+        boost and reproduces the unweighted behaviour exactly. Must be >= 1.0.
+        Default is 1.0.
     beta_edt : float, optional
         Scaling parameter modulate exponent behavior of the EDT boundary attraction potential.
         Default is 1.0.
@@ -178,29 +217,45 @@ def laplacian_graph_contraction(
         Contracted centerline coordinates as an (M, 3) matrix.
     adj : scipy.sparse.csr_matrix
         Decimated skeleton topology graph connectivity representation of shape (M, M).
+
+    Raises
+    ------
+    ValueError
+        If `w_H_medial` is smaller than 1.0.
     """
+    if w_H_medial < 1.0:
+        raise ValueError('w_H_medial must be >= 1.0.')
+
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
 
     # Conditional 3D EDT & Hard-Voxel Constraint Lookup Precomputation
     edt_volume = None
     closest_vessels_indices = None
+    medialness = None
 
-    if (use_edt or enforce_containment) and binary_segmentation is not None:
+    needs_edt = use_edt or enforce_containment or w_H_medial > 1.0
+
+    if needs_edt and binary_segmentation is not None:
         print('Computing 3D EDT Map and boundary projection lookup tensors...')
-        # Inverse transform tells background voxels how far they are from the foreground target mask
-        background_edt, nearest_indices = ndimage.distance_transform_edt(
-            binary_segmentation == 0, return_indices=True
-        )
         edt_volume = ndimage.distance_transform_edt(binary_segmentation)
-        closest_vessels_indices = nearest_indices
         vol_shape = binary_segmentation.shape
-    elif (use_edt or enforce_containment) and binary_segmentation is None:
+
+        if enforce_containment:
+            # Inverse transform tells background voxels how far they are from the foreground target mask
+            _, closest_vessels_indices = ndimage.distance_transform_edt(
+                binary_segmentation == 0, return_indices=True
+            )
+
+        if w_H_medial > 1.0:
+            medialness = compute_medialness(edt_volume, X)
+    elif needs_edt and binary_segmentation is None:
         print(
             'Warning: No segmentation mask provided. Falling back to classic approach.'
         )
         use_edt = False
         enforce_containment = False
+        w_H_medial = 1.0
 
     edt_string = f' beta_edt (EDT scale factor)={beta_edt},' if use_edt else ''
 
@@ -212,6 +267,7 @@ def laplacian_graph_contraction(
         f'Options:\n'
         f' - Anisotropic={use_anisotropic}\n'
         f' - EDT={use_edt}\n'
+        f' - Medial Boost={w_H_medial if medialness is not None else False}\n'
         f' - Hard Containment={enforce_containment}\n'
         f' - Decimation step={decimate_every}\n'
     )
@@ -244,10 +300,20 @@ def laplacian_graph_contraction(
             node_distances = np.maximum(node_distances, 0.0)
 
             w_H_per_node = w_H_base * np.exp(beta_edt / (node_distances + delta))
-            W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
-            max_pull = f' - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}'
         else:
-            W_H_sq = sparse.eye(n_vertices, format='csr') * (w_H_base**2)
+            w_H_per_node = np.full(n_vertices, w_H_base, dtype=float)
+
+        if medialness is not None:
+            # Raising the boost to the medialness score leaves boundary nodes at their
+            # baseline weight while holding inscribed-sphere centres in place.
+            w_H_per_node = w_H_per_node * (w_H_medial**medialness)
+
+        W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
+
+        if use_edt:
+            max_pull = f' - Max EDT w_H Pull: {np.max(w_H_per_node):.4f}'
+        elif medialness is not None:
+            max_pull = f' - Max Medial w_H Pull: {np.max(w_H_per_node):.4f}'
 
         # 3. Solve Implicit Update System equations
         A = (w_L**2) * L_squared + W_H_sq
@@ -313,6 +379,13 @@ def laplacian_graph_contraction(
                     rtol=1e-4,
                     maxiter=500,
                 )
+                if info != 0:
+                    warnings.warn(
+                        f'CG did not converge on axis {dim} (info={info}); the '
+                        'contraction step may be inaccurate.',
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 X_next[:, dim] = sol
 
         elif solver == 'CG':
@@ -321,6 +394,13 @@ def laplacian_graph_contraction(
                 # Use CG with the previous coordinate array as a warm start (x0)
                 # tol=1e-4 is plenty accurate for contraction steps
                 sol, info = cg(A, B[:, dim], x0=X[:, dim], rtol=1e-4, maxiter=500)
+                if info != 0:
+                    warnings.warn(
+                        f'CG did not converge on axis {dim} (info={info}); the '
+                        'contraction step may be inaccurate.',
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 X_next[:, dim] = sol
 
         # 4. Explicit Hard-Voxel Containment Constraint Projection
@@ -370,6 +450,8 @@ def laplacian_graph_contraction(
             break
 
         if (i + 1) % decimate_every == 0:
-            X, adj = edge_collapse_decimation(X, adj, min_edge_length)
+            X, adj, medialness = edge_collapse_decimation(
+                X, adj, min_edge_length, medialness=medialness, w_H_medial=w_H_medial
+            )
 
     return X, adj

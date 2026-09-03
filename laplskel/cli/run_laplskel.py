@@ -111,6 +111,18 @@ def _get_parser():
         help='Baseline structural anchor retention weight variable.',
     )
     optional.add_argument(
+        '--w_H_medial',
+        dest='w_H_medial',
+        type=float,
+        default=1.0,
+        help=(
+            'Retention weight boost applied to nodes at or around inscribed-sphere '
+            'centres, tightening the centreline onto the medial axis. Raised to the '
+            'power of each node medialness score, so boundary nodes keep their '
+            'baseline weight. 1.0 disables the boost [Default=1.0].'
+        ),
+    )
+    optional.add_argument(
         '--tol',
         type=float,
         default=0.05,

@@ -19,6 +19,7 @@ def laplacian_skeletonisation(
     beta_edt=1.0,
     w_L=0.5,
     w_H_base=0.5,
+    w_H_medial=1.0,
     tol=0.05,
     decimate_every=1,
     min_edge_length=0.01,
@@ -61,6 +62,11 @@ def laplacian_skeletonisation(
     w_H_base : float, optional
         Baseline structural node anchor positional persistence value metric.
         This should be equivalent to beta in Damseh 2021. Default is 0.5.
+    w_H_medial : float, optional
+        Multiplicative retention boost applied to nodes at or around inscribed-sphere
+        centres, raised to the power of each node's medialness score. Holding medial
+        nodes in place tightens the centreline onto the medial axis. A value of 1.0
+        disables the boost. Default is 1.0.
     tol : float, optional
         Convergence tolerance limit evaluated against mean vertex displacement.
         This should be the equivalent of gamma in Damseh 2021 (not sure). Default is 0.05.
@@ -145,6 +151,7 @@ def laplacian_skeletonisation(
         beta_edt,
         w_L,
         w_H_base,
+        w_H_medial,
         tol,
         init_graph_adj,
         local_pca_hops,

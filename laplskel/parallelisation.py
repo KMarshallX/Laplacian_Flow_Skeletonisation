@@ -20,6 +20,7 @@ def _process_single_label(
     beta_edt,
     w_L,
     w_H_base,
+    w_H_medial,
     tol,
     init_graph_adj,
     local_pca_hops,
@@ -55,6 +56,9 @@ def _process_single_label(
     w_H_base : float
         Baseline structural node anchor positional persistence value metric.
         This should be equivalent to beta in Damseh 2021.
+    w_H_medial : float
+        Multiplicative retention boost applied to nodes at or around inscribed-sphere
+        centres. A value of 1.0 disables the boost.
     tol : float
         Convergence tolerance limit evaluated against mean vertex displacement.
         This should be the equivalent of gamma in Damseh 2021 (not sure).
@@ -114,6 +118,7 @@ def _process_single_label(
         beta_edt=beta_edt,
         w_L=w_L,
         w_H_base=w_H_base,
+        w_H_medial=w_H_medial,
         tol=tol,
         local_pca_hops=local_pca_hops,
         decimate_every=decimate_every,
@@ -143,6 +148,7 @@ def process_components(
     beta_edt,
     w_L,
     w_H_base,
+    w_H_medial,
     tol,
     init_graph_adj,
     local_pca_hops,
@@ -187,6 +193,7 @@ def process_components(
                 beta_edt,
                 w_L,
                 w_H_base,
+                w_H_medial,
                 tol,
                 init_graph_adj,
                 local_pca_hops,
