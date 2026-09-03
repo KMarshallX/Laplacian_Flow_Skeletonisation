@@ -69,8 +69,8 @@ def laplacian_skeletonisation(
         triggering an edge-collapse decimation execution. Default is 1.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo
-        structural merging, i.e. the isotropic voxel size of the grid used for
-        decimation. Default is 0.01.
+        structural merging, expressed as a fraction of the isotropic voxel length.
+        Default is 0.01.
     downsample : bool, optional
         Flag setting whether point arrays containing high density are uniformly downsampled
         to stay within safe RAM footprints. Default is False.

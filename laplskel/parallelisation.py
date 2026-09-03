@@ -68,8 +68,7 @@ def _process_single_label(
         triggering an edge-collapse decimation execution.
     min_edge_length : float
         The Euclidean spatial threshold criteria below which two connected nodes undergo
-        structural merging, i.e. the isotropic voxel size of the grid used for
-        decimation.
+        structural merging, expressed as a fraction of the isotropic voxel length.
     num_features : int
         Number of extracted labels.
     solver : ['LU', 'CG', 'AMGCG'], string, optional

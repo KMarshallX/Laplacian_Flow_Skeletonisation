@@ -121,7 +121,7 @@ def _get_parser():
         dest='decimate_every',
         type=int,
         default=1,
-        help='Decimate nodes every N steps [Default=2].',
+        help='Decimate nodes every N steps [Default=1].',
     )
     optional.add_argument(
         '--dec_grid_size',
@@ -130,8 +130,8 @@ def _get_parser():
         default=0.01,
         help=(
             'The Euclidean spatial threshold criteria below which two connected nodes '
-            'undergo structural merging, i.e. the isotropic voxel size of the grid used'
-            ' for decimation.'
+            'undergo structural merging, expressed as a fraction of the isotropic '
+            'voxel length.'
         ),
     )
     optional.add_argument(

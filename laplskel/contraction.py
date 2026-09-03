@@ -208,7 +208,7 @@ def laplacian_graph_contraction(
         f'Starting contraction with {X.shape[0]} nodes \n\n'
         f'Params:\n'
         f' - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},\n'
-        f' -{edt_string} min_edge_length (decimation grid)={min_edge_length}\n\n'
+        f' -{edt_string} min_edge_length (collapse threshold)={min_edge_length}\n\n'
         f'Options:\n'
         f' - Anisotropic={use_anisotropic}\n'
         f' - EDT={use_edt}\n'
