@@ -126,7 +126,7 @@ def _get_parser():
         '--tol',
         type=float,
         default=0.05,
-        help='Convergence tolerance limit evaluated against mean vertex displacement.',
+        help='Maximum contraction movement in voxels, required for three stable steps.',
     )
     optional.add_argument(
         '--decimate_every',
@@ -141,9 +141,18 @@ def _get_parser():
         type=float,
         default=0.01,
         help=(
-            'The Euclidean spatial threshold criteria below which two connected nodes '
-            'undergo structural merging, expressed as a fraction of the isotropic '
-            'voxel length.'
+            'Maximum intermediate merge-cluster diameter in voxel units. '
+            'Final branch simplification uses --merge_tolerance.'
+        ),
+    )
+    optional.add_argument(
+        '--merge_tolerance',
+        type=float,
+        default=0.25,
+        help=(
+            'Maximum branch simplification error in voxels [Default=0.25]. '
+            '0 retains reference sampling; every foreground tunnel is preserved '
+            'at every setting using 26-connectivity.'
         ),
     )
     optional.add_argument(
@@ -177,8 +186,8 @@ def _get_parser():
         '--label_connectivity',
         type=int,
         choices=VALID_CONNECTIVITY,
-        default=6,
-        help='Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].',
+        default=26,
+        help='Component labeling connectivity; use 26 for tunnel preservation [Default=26].',
     )
     optional.add_argument(
         '--solver',
@@ -206,7 +215,7 @@ def _get_parser():
     optional.add_argument(
         '--downsample',
         action='store_true',
-        help='Downsample the original matrix to preserve RAM.',
+        help='Unsupported with strict tunnel preservation; using this flag raises an error.',
     )
     optional.add_argument(
         '--seed',
