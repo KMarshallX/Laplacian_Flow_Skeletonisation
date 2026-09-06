@@ -125,8 +125,10 @@ def write_graphml(
     Write a contracted graph using the SkelHub Laplacian GraphML schema.
 
     Each edge stores an endpoint-inclusive 26-connected voxel run in
-    ``centerline_voxels``. If supplied, edge_paths retains the fitted polyline
-    through degree-two simplification. Node radius is intentionally omitted.
+    ``centerline_voxels`` and the unrounded floating-point path in voxel
+    coordinates in ``centerline_voxel_points``. If supplied, edge_paths retains
+    the fitted polyline through degree-two simplification; otherwise the path
+    contains the two node positions. Node radius is intentionally omitted.
     """
     X = np.asarray(X, dtype=float)
     component_labels = np.asarray(component_labels, dtype=int)
@@ -180,6 +182,7 @@ def write_graphml(
             'double',
         ),
         ('e_centerline_voxels', 'edge', 'centerline_voxels', 'string'),
+        ('e_centerline_voxel_points', 'edge', 'centerline_voxel_points', 'string'),
         (
             'e_num_centerline_voxels',
             'edge',
@@ -267,6 +270,10 @@ def write_graphml(
             (
                 'e_centerline_voxels',
                 json.dumps(centerline_voxels, separators=(',', ':')),
+            ),
+            (
+                'e_centerline_voxel_points',
+                json.dumps(np.asarray(path, dtype=float).tolist(), separators=(',', ':')),
             ),
             ('e_num_centerline_voxels', len(centerline_voxels)),
             ('e_component_index', component_label),
