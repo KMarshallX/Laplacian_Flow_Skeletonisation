@@ -17,8 +17,9 @@ def edge_collapse_decimation(
     """
     Perform structural decimation (E-collapse).
 
-    Merges vertices connected by edges shorter than min_edge_length to maintain
-    clean topology and prevent node crowding during graph contraction.
+    Merge short edges to reduce crowding, bounding each complete cluster by
+    min_edge_length. This intermediate operation does not certify foreground
+    topology; the workflow's final foreground-guided refinement does that.
 
     When medialness scores are supplied, merged coordinates are averaged with
     medial weighting so the surviving vertex is drawn toward the most medial of its
@@ -34,8 +35,7 @@ def edge_collapse_decimation(
         A square, sparse adjacency matrix (e.g., CSR or COO format) of shape (N, N)
         representing the structural connectivity between nodes.
     min_edge_length : float
-        The structural distance threshold. Any edge with a Euclidean length shorter
-        than this value will be collapsed.
+        Maximum bounding-box diagonal of a merged cluster, in voxel units.
     medialness : numpy.ndarray, optional
         An (N,) array of medialness scores in [0, 1] used to weight merged coordinates.
         Default is None, which averages merged coordinates uniformly.
@@ -86,12 +86,23 @@ def edge_collapse_decimation(
     coord_sums = X * merge_weights[:, None]
     weight_sums = merge_weights.copy()
 
-    for u, v in zip(short_u, short_v):
+    # Bound whole clusters, not just individual links in a potentially long chain.
+    lower_bounds = X.copy()
+    upper_bounds = X.copy()
+    for edge_index in np.argsort(edge_dists[collapse_mask], kind='stable'):
+        u, v = short_u[edge_index], short_v[edge_index]
+        root_u, root_v = uf.find(u), uf.find(v)
+        lower = np.minimum(lower_bounds[root_u], lower_bounds[root_v])
+        upper = np.maximum(upper_bounds[root_u], upper_bounds[root_v])
+        if np.linalg.norm(upper - lower) >= min_edge_length:
+            continue
         merged, root_u, root_v = uf.union(u, v)
         if merged:
             # Accumulate positions into the new combined root
             coord_sums[root_u] += coord_sums[root_v]
             weight_sums[root_u] += weight_sums[root_v]
+            lower_bounds[root_u] = lower
+            upper_bounds[root_u] = upper
 
     # Resolve final root assignments for every vertex
     final_roots = np.array([uf.find(i) for i in range(n_vertices)])
@@ -188,7 +199,8 @@ def laplacian_graph_contraction(
     max_iter : int, optional
         Maximum allowed iteration steps for the contraction flow solver. Default is 2000.
     tol : float, optional
-        Convergence tolerance limit evaluated against mean vertex displacement. Default is 1e-3.
+        Maximum vertex displacement tolerance in voxel units. Three stable steps
+        without structural changes are required. Default is 0.05.
     decimate_every : int, optional
         Frequency cadence interval defining how many contraction loop steps occur before triggering
         an edge-collapse decimation execution. Default is 1.
@@ -223,8 +235,12 @@ def laplacian_graph_contraction(
     ValueError
         If `w_H_medial` is smaller than 1.0.
     """
-    if w_H_medial < 1.0:
-        raise ValueError('w_H_medial must be >= 1.0.')
+    if not np.isfinite(w_H_medial) or w_H_medial < 1.0:
+        raise ValueError('w_H_medial must be finite and >= 1.0.')
+    if solver not in ('CG', 'AMGCG', 'LU'):
+        raise ValueError('solver must be CG, AMGCG, or LU.')
+    if max_iter < 1 or decimate_every < 1:
+        raise ValueError('max_iter and decimate_every must be positive.')
 
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
@@ -272,6 +288,7 @@ def laplacian_graph_contraction(
         f' - Decimation step={decimate_every}\n'
     )
 
+    stable_steps = 0
     for i in range(max_iter):
         n_vertices = X.shape[0]
 
@@ -317,7 +334,10 @@ def laplacian_graph_contraction(
 
         # 3. Solve Implicit Update System equations
         A = (w_L**2) * L_squared + W_H_sq
-        B = W_H_sq.dot(X)
+        # Solve for motion, so large anchors or coordinate offsets cannot make
+        # CG accept the previous coordinates without taking an accurate step.
+        B = -(w_L**2) * L.T.dot(L.dot(X - X.mean(axis=0)))
+        step_solved = True
 
         # Select solver between LU, AMGCG, and CG.
         if solver == 'AMGCG':
@@ -366,7 +386,7 @@ def laplacian_graph_contraction(
         if solver == 'LU':
             X_next = np.zeros_like(X)
             for dim in range(3):
-                X_next[:, dim] = spsolve(A, B[:, dim])
+                X_next[:, dim] = X[:, dim] + spsolve(A, B[:, dim])
 
         elif solver == 'AMGCG':
             X_next = np.zeros_like(X)
@@ -374,34 +394,39 @@ def laplacian_graph_contraction(
                 sol, info = cg(
                     A,
                     B[:, dim],
-                    x0=X[:, dim],
+                    x0=np.zeros(n_vertices),
                     M=preconditioner,
-                    rtol=1e-4,
+                    rtol=1e-6,
                     maxiter=500,
                 )
                 if info != 0:
+                    step_solved = False
                     warnings.warn(
                         f'CG did not converge on axis {dim} (info={info}); the '
                         'contraction step may be inaccurate.',
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                X_next[:, dim] = sol
+                X_next[:, dim] = X[:, dim] + sol
 
         elif solver == 'CG':
             X_next = np.zeros_like(X)
             for dim in range(3):
-                # Use CG with the previous coordinate array as a warm start (x0)
-                # tol=1e-4 is plenty accurate for contraction steps
-                sol, info = cg(A, B[:, dim], x0=X[:, dim], rtol=1e-4, maxiter=500)
+                sol, info = cg(
+                    A, B[:, dim], x0=np.zeros(n_vertices), rtol=1e-6, maxiter=500
+                )
                 if info != 0:
+                    step_solved = False
                     warnings.warn(
                         f'CG did not converge on axis {dim} (info={info}); the '
                         'contraction step may be inaccurate.',
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                X_next[:, dim] = sol
+                X_next[:, dim] = X[:, dim] + sol
+
+        if not np.all(np.isfinite(X_next)):
+            raise RuntimeError('Contraction produced non-finite coordinates.')
 
         # 4. Explicit Hard-Voxel Containment Constraint Projection
         if enforce_containment:
@@ -437,21 +462,31 @@ def laplacian_graph_contraction(
                 ).astype(float)
                 max_pull += f' [Projected: {escaped_count} escaped nodes]'
 
-        displacement = np.mean(np.linalg.norm(X_next - X, axis=1))
+        movements = np.linalg.norm(X_next - X, axis=1)
+        displacement = np.mean(movements)
+        max_displacement = np.max(movements)
         X = X_next
 
         print(
             f'Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - '
-            f'Error Drift: {displacement:.5f}{max_pull}'
+            f'Mean Drift: {displacement:.5f} - Max Drift: {max_displacement:.5f}{max_pull}'
         )
 
-        if displacement < tol:
-            print('Convergence criteria reached.')
-            break
-
-        if (i + 1) % decimate_every == 0:
+        small_step = max_displacement < tol and step_solved
+        if (i + 1) % decimate_every == 0 or small_step or i + 1 == max_iter:
             X, adj, medialness = edge_collapse_decimation(
                 X, adj, min_edge_length, medialness=medialness, w_H_medial=w_H_medial
             )
+        stable_steps = stable_steps + 1 if small_step and len(X) == n_vertices else 0
+        if stable_steps >= 3:
+            print('Contraction geometry stable.')
+            break
+    else:
+        warnings.warn(
+            'Contraction reached max_iter without stable geometry; these coordinates '
+            'are provisional and require foreground-guided refinement.',
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     return X, adj

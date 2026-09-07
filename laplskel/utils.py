@@ -2,6 +2,7 @@
 
 import json
 import xml.etree.ElementTree as ET
+from itertools import product
 
 import numpy as np
 from scipy import ndimage, sparse
@@ -11,7 +12,7 @@ GRAPHML_NAMESPACE = 'http://graphml.graphdrawing.org/xmlns'
 GRAPHML_XSI_NAMESPACE = 'http://www.w3.org/2001/XMLSchema-instance'
 
 
-def coords_to_dense_3d(X, volume_shape):
+def coords_to_dense_3d(X, volume_shape, adjacency_matrix=None, binary_segmentation=None):
     """
     Create and fill in a volume using coordinates of points.
 
@@ -21,6 +22,10 @@ def coords_to_dense_3d(X, volume_shape):
         The 3D coordinates of the areas with content.
     volume_shape : tuple of int (D, H, W)
         The structural grid dimensions of the target 3D matrix.
+    adjacency_matrix : sparse matrix, optional
+        Graph edges to rasterize along with nodes.
+    binary_segmentation : array, optional
+        Foreground used to resolve voxel-boundary ties and check containment.
 
     Returns
     -------
@@ -30,15 +35,13 @@ def coords_to_dense_3d(X, volume_shape):
     # 1. Initialize empty dense matrix
     dense_volume = np.zeros(volume_shape, dtype=bool)
 
-    coords = np.rint(X).astype(np.int8)
-
-    # 2. Fix coordinates on boundaries due to numpy's round-to-even
-    for dim, bound in enumerate(volume_shape):
-        coords[:, dim][coords[:, dim] == bound] = bound - 1
-
-    # 3. Rasterize edges and nodes into the grid
-    for i in coords:
-        dense_volume[tuple(i)] = True
+    for point in X:
+        dense_volume[_foreground_voxel(point, volume_shape, binary_segmentation)] = True
+    if adjacency_matrix is not None:
+        rows, cols = sparse.triu(adjacency_matrix, k=1).nonzero()
+        for u, v in zip(rows, cols):
+            for voxel in _edge_voxels(X[u], X[v], volume_shape, binary_segmentation):
+                dense_volume[voxel] = True
 
     return dense_volume
 
@@ -53,19 +56,45 @@ def _clip_voxel(voxel, volume_shape):
     return tuple(int(value) for value in clipped)
 
 
-def _edge_voxels(start, end, volume_shape):
-    """Return an endpoint-inclusive 26-connected voxel run for one graph edge."""
-    start = np.rint(np.asarray(start, dtype=float)).astype(int)
-    end = np.rint(np.asarray(end, dtype=float)).astype(int)
-    delta = end - start
-    steps = int(np.max(np.abs(delta)))
-    if steps == 0:
-        return [_clip_voxel(start, volume_shape)]
+def _foreground_voxel(point, volume_shape, mask=None):
+    """Resolve a boundary contact to an incident foreground voxel."""
+    voxel = _clip_voxel(np.rint(point), volume_shape)
+    if mask is None:
+        return voxel
+    if mask[voxel] and np.max(np.abs(np.asarray(voxel) - point)) <= 0.5 + 1e-9:
+        return voxel
+    # Diagonal cells can meet exactly at a corner where round-to-even picks a
+    # background cell. Only incident cells are allowed; never project an escape.
+    for offset in product((-1, 0, 1), repeat=3):
+        candidate = np.asarray(voxel) + offset
+        if (
+            np.all(candidate >= 0)
+            and np.all(candidate < volume_shape)
+            and np.max(np.abs(candidate - point)) <= 0.5 + 1e-9
+            and mask[tuple(candidate)]
+        ):
+            return tuple(int(value) for value in candidate)
+    raise ValueError('Graph geometry leaves the foreground mask.')
 
+
+def _edge_voxels(start, end, volume_shape, binary_segmentation=None):
+    """Traverse every voxel interval of a continuous graph edge, including ends."""
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    delta = end - start
+    crossings = [0.0, 1.0]
+    for axis in range(3):
+        if delta[axis] == 0:
+            continue
+        low, high = sorted((start[axis], end[axis]))
+        planes = np.arange(np.ceil(low - 0.5), np.floor(high - 0.5) + 1) + 0.5
+        crossings.extend(((planes - start[axis]) / delta[axis]).tolist())
+    crossings = np.unique(np.clip(crossings, 0.0, 1.0))
+    fractions = [0.0] + ((crossings[:-1] + crossings[1:]) / 2).tolist() + [1.0]
     voxels = []
-    for step in range(steps + 1):
-        point = np.rint(start + delta * (step / steps)).astype(int)
-        voxel = _clip_voxel(point, volume_shape)
+    for fraction in fractions:
+        point = start + fraction * delta
+        voxel = _foreground_voxel(point, volume_shape, binary_segmentation)
         if not voxels or voxels[-1] != voxel:
             voxels.append(voxel)
     return voxels
@@ -89,12 +118,17 @@ def write_graphml(
     affine,
     volume_shape,
     output_path,
+    binary_segmentation=None,
+    edge_paths=None,
 ):
     """
     Write a contracted graph using the SkelHub Laplacian GraphML schema.
 
-    Each edge stores a rounded, clipped, endpoint-inclusive 26-connected voxel
-    run in ``centerline_voxels``. Node radius is intentionally omitted.
+    Each edge stores an endpoint-inclusive 26-connected voxel run in
+    ``centerline_voxels`` and the unrounded floating-point path in voxel
+    coordinates in ``centerline_voxel_points``. If supplied, edge_paths retains
+    the fitted polyline through degree-two simplification; otherwise the path
+    contains the two node positions. Node radius is intentionally omitted.
     """
     X = np.asarray(X, dtype=float)
     component_labels = np.asarray(component_labels, dtype=int)
@@ -148,6 +182,7 @@ def write_graphml(
             'double',
         ),
         ('e_centerline_voxels', 'edge', 'centerline_voxels', 'string'),
+        ('e_centerline_voxel_points', 'edge', 'centerline_voxel_points', 'string'),
         (
             'e_num_centerline_voxels',
             'edge',
@@ -216,11 +251,12 @@ def write_graphml(
 
         component_edge_index = component_edge_indices.get(component_label, 0)
         component_edge_indices[component_label] = component_edge_index + 1
-        centerline_voxels = _edge_voxels(
-            X[source],
-            X[target],
-            volume_shape,
-        )
+        path = X[[source, target]] if edge_paths is None else edge_paths[(source, target)]
+        centerline_voxels = []
+        for start, end in zip(path[:-1], path[1:]):
+            for voxel in _edge_voxels(start, end, volume_shape, binary_segmentation):
+                if not centerline_voxels or centerline_voxels[-1] != voxel:
+                    centerline_voxels.append(voxel)
 
         edge = ET.SubElement(
             graph,
@@ -234,6 +270,10 @@ def write_graphml(
             (
                 'e_centerline_voxels',
                 json.dumps(centerline_voxels, separators=(',', ':')),
+            ),
+            (
+                'e_centerline_voxel_points',
+                json.dumps(np.asarray(path, dtype=float).tolist(), separators=(',', ':')),
             ),
             ('e_num_centerline_voxels', len(centerline_voxels)),
             ('e_component_index', component_label),
