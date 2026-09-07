@@ -9,6 +9,17 @@ VALID_CONNECTIVITY = (6, 18, 26)
 VALID_SOLVER = ('LU', 'CG', 'AMGCG')
 
 
+def _positive_integer(value):
+    """Parse a strictly positive integer argument."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError('must be a positive integer') from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return parsed
+
+
 def _get_parser():
     """
     Parse command line inputs for this function.
@@ -43,6 +54,15 @@ def _get_parser():
         help='Path destination for the generated skeleton arrays.',
     )
     optional.add_argument(
+        '--graphml',
+        action='store_true',
+        default=argparse.SUPPRESS,
+        help=(
+            'Write the converged graph as GraphML instead of coordinate and '
+            'adjacency NPZ files.'
+        ),
+    )
+    optional.add_argument(
         '--use_edt',
         action='store_true',
         help=(
@@ -54,7 +74,9 @@ def _get_parser():
         '--use_anisotropic',
         action='store_true',
         help=(
-            'Flag to disable anisotropic constraints and fall back to standard '
+            'Flag to enable Laplacian weighting, '
+            'favoring cross-sectional contraction while reducing longitudinal contraction.'
+            'Omitting this flag will disable anisotropic constraints and fall back to standard '
             'isotropic Laplacian matrix operations.'
         ),
     )
@@ -89,17 +111,29 @@ def _get_parser():
         help='Baseline structural anchor retention weight variable.',
     )
     optional.add_argument(
+        '--w_H_medial',
+        dest='w_H_medial',
+        type=float,
+        default=1.0,
+        help=(
+            'Retention weight boost applied to nodes at or around inscribed-sphere '
+            'centres, tightening the centreline onto the medial axis. Raised to the '
+            'power of each node medialness score, so boundary nodes keep their '
+            'baseline weight. 1.0 disables the boost [Default=1.0].'
+        ),
+    )
+    optional.add_argument(
         '--tol',
         type=float,
         default=0.05,
-        help='Convergence tolerance limit evaluated against mean vertex displacement.',
+        help='Maximum contraction movement in voxels, required for three stable steps.',
     )
     optional.add_argument(
         '--decimate_every',
         dest='decimate_every',
         type=int,
         default=1,
-        help='Decimate nodes every N steps [Default=2].',
+        help='Decimate nodes every N steps [Default=1].',
     )
     optional.add_argument(
         '--dec_grid_size',
@@ -107,18 +141,38 @@ def _get_parser():
         type=float,
         default=0.01,
         help=(
-            'The Euclidean spatial threshold criteria below which two connected nodes '
-            'undergo structural merging, i.e. the isotropic voxel size of the grid used'
-            ' for decimation.'
+            'Maximum intermediate merge-cluster diameter in voxel units. '
+            'Final branch simplification uses --merge_tolerance.'
         ),
     )
     optional.add_argument(
-        '--max_distance_adjmat',
-        dest='max_distance',
+        '--merge_tolerance',
         type=float,
-        default=2.4999,
+        default=0.25,
         help=(
-            'Maximum distance to consider when computing the sparse adjacency matrix.'
+            'Maximum branch simplification error in voxels [Default=0.25]. '
+            '0 retains reference sampling; every foreground tunnel is preserved '
+            'at every setting using 26-connectivity. Higher values allow more aggressive simplification, '
+            'subject to foreground and topology constraints.'
+        ),
+    )
+    optional.add_argument(
+        '--init_graph_adj',
+        type=int,
+        choices=VALID_CONNECTIVITY,
+        default=26,
+        help=(
+            'Voxel-neighborhood connectivity for the initial graph (6, 18, or 26) '
+            '[Default=26].'
+        ),
+    )
+    optional.add_argument(
+        '--local_pca_hops',
+        type=_positive_integer,
+        default=1,
+        help=(
+            'Number of graph hops used for each local tangent PCA neighborhood '
+            '[Default=1].'
         ),
     )
     optional.add_argument(
@@ -133,8 +187,8 @@ def _get_parser():
         '--label_connectivity',
         type=int,
         choices=VALID_CONNECTIVITY,
-        default=6,
-        help='Neighborhood connectivity structure for labeling (6, 18, or 26) [Default=6].',
+        default=26,
+        help='Component labeling connectivity; use 26 for tunnel preservation [Default=26].',
     )
     optional.add_argument(
         '--solver',
@@ -162,7 +216,7 @@ def _get_parser():
     optional.add_argument(
         '--downsample',
         action='store_true',
-        help='Downsample the original matrix to preserve RAM.',
+        help='Unsupported with strict tunnel preservation; using this flag raises an error.',
     )
     optional.add_argument(
         '--seed',
