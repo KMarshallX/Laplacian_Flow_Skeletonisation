@@ -152,7 +152,8 @@ def _get_parser():
         help=(
             'Maximum branch simplification error in voxels [Default=0.25]. '
             '0 retains reference sampling; every foreground tunnel is preserved '
-            'at every setting using 26-connectivity.'
+            'at every setting using 26-connectivity. Higher values allow more aggressive simplification, '
+            'subject to foreground and topology constraints.'
         ),
     )
     optional.add_argument(
