@@ -1,3 +1,35 @@
+# 0.6.0 (Mon Sep 07 2026)
+
+:tada: This release contains work from a new contributor! :tada:
+
+Thank you, Marshall Xu ([@KMarshallX](https://github.com/KMarshallX)), for all your work!
+
+#### 🚀 Enhancement
+
+- Refactorization and GraphMl Support [#6](https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/6) ([@KMarshallX](https://github.com/KMarshallX) [@smoia](https://github.com/smoia))
+- Refactorization and GraphMl Support [#4](https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/4) ([@KMarshallX](https://github.com/KMarshallX) [@smoia](https://github.com/smoia))
+
+#### 💥 Breaking Change during development
+
+- Performance optimization and new options [#5](https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/5) ([@smoia](https://github.com/smoia))
+
+#### ⚠️ Pushed to `master`
+
+- ref: Massive refactoring (see https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/6/commits/78ff56e4f3c09b41dd01601d7e28d0a12f48c624) ([@smoia](https://github.com/smoia))
+
+#### 🏠 Internal
+
+- Bump actions/checkout from 6 to 7 [#3](https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/3) ([@dependabot[bot]](https://github.com/dependabot[bot]))
+- Bump actions/labeler from 6 to 7 [#2](https://github.com/smoia/Laplacian_Flow_Skeletonisation/pull/2) ([@dependabot[bot]](https://github.com/dependabot[bot]))
+
+#### Authors: 3
+
+- [@dependabot[bot]](https://github.com/dependabot[bot])
+- Marshall Xu ([@KMarshallX](https://github.com/KMarshallX))
+- Stefano Moia ([@smoia](https://github.com/smoia))
+
+---
+
 # 0.5.1 (Sat Aug 01 2026)
 
 #### 🐛 Bug Fix
