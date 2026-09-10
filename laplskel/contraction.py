@@ -154,6 +154,7 @@ def laplacian_graph_contraction(
     alpha_tang=0.1,
     local_pca_hops=1,
     solver='CG',
+    provisional=False,
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -222,6 +223,10 @@ def laplacian_graph_contraction(
         data, AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before
         running CG, which makes it faster, but may require a tad more memory.
         Default is CG.
+    provisional : bool, optional
+        If True, treat ``max_iter`` as an intentional bounded contraction stage and
+        do not warn when that stage ends before geometric convergence. Default is
+        False. This does not change the numerical update or convergence test.
 
     Returns
     -------
@@ -482,6 +487,8 @@ def laplacian_graph_contraction(
             print('Contraction geometry stable.')
             break
     else:
+        if provisional:
+            return X, adj
         warnings.warn(
             'Contraction reached max_iter without stable geometry; these coordinates '
             'are provisional and require foreground-guided refinement.',

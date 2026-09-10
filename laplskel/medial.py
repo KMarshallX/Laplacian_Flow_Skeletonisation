@@ -1,4 +1,6 @@
-"""Medial-axis scoring used to weight positional retention during contraction."""
+"""Medial-axis scoring and branch-wise EDT ridge guidance."""
+
+import heapq
 
 import numpy as np
 from scipy import ndimage
@@ -65,3 +67,121 @@ def compute_medialness(edt_volume, node_coords, threshold=0.8):
     ratios = edt_volume[lookup] / np.maximum(neighborhood_max[lookup], 1e-12)
 
     return np.clip((ratios - threshold) / (1.0 - threshold), 0.0, 1.0)
+
+
+def estimate_graph_tangents(
+    coordinates, adjacency, spacing=(1.0, 1.0, 1.0), window=None
+):
+    """Estimate branch directions by physical arc-length neighbourhood PCA.
+
+    The neighbourhood follows graph edges, so nearby but unconnected branches do
+    not contaminate one another. Directions are re-estimated whenever this helper
+    is called; their sign is intentionally arbitrary.
+    """
+    points = np.asarray(coordinates, dtype=float)
+    spacing = np.asarray(spacing, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('coordinates must have shape (N, 3).')
+    if (
+        spacing.shape != (3,)
+        or np.any(~np.isfinite(spacing))
+        or np.any(spacing <= 0)
+    ):
+        raise ValueError('spacing must contain three positive finite values.')
+    if window is None:
+        window = 2.0 * float(np.min(spacing))
+    if not np.isfinite(window) or window <= 0:
+        raise ValueError('window must be positive and finite.')
+
+    graph = adjacency.tocsr()
+    tangents = np.zeros_like(points)
+    physical = points * spacing
+    for start in range(len(points)):
+        distances = {start: 0.0}
+        queue = [(0.0, start)]
+        members = []
+        while queue:
+            distance, vertex = heapq.heappop(queue)
+            if distance != distances[vertex] or distance > window:
+                continue
+            members.append(vertex)
+            begin, end = graph.indptr[vertex : vertex + 2]
+            for neighbour in graph.indices[begin:end]:
+                next_distance = distance + np.linalg.norm(
+                    physical[vertex] - physical[neighbour]
+                )
+                if next_distance <= window and next_distance < distances.get(
+                    int(neighbour), np.inf
+                ):
+                    distances[int(neighbour)] = float(next_distance)
+                    heapq.heappush(queue, (float(next_distance), int(neighbour)))
+        local = physical[members]
+        if len(local) >= 2:
+            covariance = (local - local.mean(axis=0)).T @ (local - local.mean(axis=0))
+            tangents[start] = np.linalg.eigh(covariance)[1][:, -1]
+        else:
+            tangents[start, 0] = 1.0
+    return tangents
+
+
+def transverse_edt_targets(
+    edt_volume,
+    foreground,
+    coordinates,
+    tangents,
+    spacing=(1.0, 1.0, 1.0),
+):
+    """Find a nearby high-EDT target in each point's transverse plane.
+
+    EDT is sampled from the original foreground. The search radius is the larger
+    of two minimum voxel spacings and the EDT radius at the current point. Candidate
+    ties are resolved by proximity, which gives a continuous branch preference.
+    """
+    edt = np.asarray(edt_volume, dtype=float)
+    mask = np.asarray(foreground, dtype=bool)
+    points = np.asarray(coordinates, dtype=float)
+    directions = np.asarray(tangents, dtype=float)
+    spacing = np.asarray(spacing, dtype=float)
+    if edt.shape != mask.shape or edt.ndim != 3:
+        raise ValueError('edt_volume and foreground must be matching 3D arrays.')
+    if points.shape != directions.shape or points.ndim != 2 or points.shape[1] != 3:
+        raise ValueError('coordinates and tangents must have matching shape (N, 3).')
+
+    sampled_radius = ndimage.map_coordinates(
+        edt, points.T, order=1, mode='nearest'
+    )
+    targets = points.copy()
+    h = float(np.min(spacing))
+    bounds = np.asarray(mask.shape)
+    for index, (point, tangent, radius) in enumerate(
+        zip(points, directions, sampled_radius)
+    ):
+        search_radius = max(2.0 * h, float(radius))
+        voxel_radius = np.ceil(search_radius / spacing).astype(int)
+        centre = np.rint(point).astype(int)
+        lower = np.maximum(centre - voxel_radius, 0)
+        upper = np.minimum(centre + voxel_radius + 1, bounds)
+        candidates = np.argwhere(
+            mask[tuple(slice(a, b) for a, b in zip(lower, upper))]
+        ) + lower
+        if not len(candidates):
+            continue
+        offsets = (candidates - point) * spacing
+        tangent_norm = np.linalg.norm(tangent)
+        if tangent_norm > 0:
+            axial = np.abs(offsets @ (tangent / tangent_norm))
+        else:
+            axial = np.zeros(len(candidates))
+        radial = np.linalg.norm(offsets, axis=1)
+        eligible = (axial <= 0.5 * h + 1e-12) & (
+            radial <= search_radius + 1e-12
+        )
+        if not np.any(eligible):
+            continue
+        candidates = candidates[eligible]
+        radial = radial[eligible]
+        values = edt[tuple(candidates.T)]
+        best_value = np.max(values)
+        best = np.flatnonzero(np.isclose(values, best_value, rtol=0.0, atol=1e-12))
+        targets[index] = candidates[best[np.argmin(radial[best])]]
+    return targets

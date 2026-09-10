@@ -33,6 +33,7 @@ def laplacian_skeletonisation(
     n_jobs=None,
     graphml=False,
     merge_tolerance=0.25,
+    alternating=False,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -109,6 +110,10 @@ def laplacian_skeletonisation(
         Maximum branch polyline error in voxel units during final refinement.
         Zero retains reference sampling. All values preserve foreground tunnels
         under 26-connectivity. Default is 0.25.
+    alternating : bool, optional
+        Use the experimental fixed-schedule contraction/thinning workflow. It uses
+        the original physical EDT for ridge guidance, while the established workflow
+        remains the default. Default is False.
 
     Returns
     -------
@@ -165,6 +170,8 @@ def laplacian_skeletonisation(
         n_jobs,
         solver,
         merge_tolerance,
+        alternating,
+        img.header.get_zooms()[:3],
     )
 
     print('Reuniting results from parallel jobs.')

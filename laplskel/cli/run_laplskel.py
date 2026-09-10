@@ -63,6 +63,14 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        '--alternating',
+        action='store_true',
+        help=(
+            'Use the experimental fixed-schedule contraction/thinning workflow '
+            'with original-foreground EDT ridge guidance.'
+        ),
+    )
+    optional.add_argument(
         '--use_edt',
         action='store_true',
         help=(
