@@ -33,6 +33,7 @@ def _process_single_label(
     merge_tolerance=0.25,
     alternating=False,
     voxel_spacing=(1.0, 1.0, 1.0),
+    contraction_steps=5,
 ):
     """
     Worker function to process a single connected component label.
@@ -90,6 +91,8 @@ def _process_single_label(
         Route the component through the experimental alternating workflow.
     voxel_spacing : tuple of float, optional
         Physical voxel spacing used by EDT and geometric-distance calculations.
+    contraction_steps : int, optional
+        Maximum contraction iterations per alternating cycle. Default is 5.
 
     Returns
     -------
@@ -105,8 +108,6 @@ def _process_single_label(
         Fitted edge polylines in global coordinates, before sampling reduction.
     """
     X_init_local = np.argwhere(cropped_label).astype(np.uint16)
-    tree = KDTree(X_init_local)
-
     # Skip small noise components
     if len(X_init_local) <= 3:
         refined, adj_sparse, voxels, paths = refine_graph(
@@ -122,13 +123,11 @@ def _process_single_label(
         f'\n--- Processing Label {label_id}/{num_features} ({X_init_local.sum()} voxels) ---'
     )
 
-    print(f'Computing {init_graph_adj}-connected voxel graph...')
-    adj_sparse = compute_sparse_adjacency_matrix(tree, init_graph_adj)
-
     if alternating:
         label_X_local, label_adj, voxels, paths = alternating_graph_skeletonisation(
             cropped_label,
             spacing=voxel_spacing,
+            contraction_steps=contraction_steps,
             use_anisotropic=use_anisotropic,
             w_L=w_L,
             w_H_base=w_H_base,
@@ -140,6 +139,10 @@ def _process_single_label(
         )
     else:
         # Run the established contraction followed by complete refinement.
+        print(f'Computing {init_graph_adj}-connected voxel graph...')
+        adj_sparse = compute_sparse_adjacency_matrix(
+            KDTree(X_init_local), init_graph_adj
+        )
         label_X_local, label_adj = laplacian_graph_contraction(
             X_init_local,
             adj_sparse,
@@ -197,6 +200,7 @@ def process_components(
     merge_tolerance=0.25,
     alternating=False,
     voxel_spacing=(1.0, 1.0, 1.0),
+    contraction_steps=5,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -245,6 +249,7 @@ def process_components(
                 merge_tolerance,
                 alternating,
                 voxel_spacing,
+                contraction_steps,
             )
         )
 

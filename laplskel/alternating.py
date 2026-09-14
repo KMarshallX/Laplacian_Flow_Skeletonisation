@@ -1,6 +1,7 @@
 """Experimental alternating geometric contraction and topological thinning."""
 
 import warnings
+from itertools import product
 
 import numpy as np
 from scipy import ndimage, sparse
@@ -34,27 +35,244 @@ def _adjacency_from_edges(n_vertices, edges):
     )
 
 
-def _skeleton_state(mask, guidance):
-    voxels = _thin_foreground(mask, guidance).astype(int)
+def _resample_edges(coordinates, edges, spacing):
+    """Insert graph vertices at half-voxel physical arc-length intervals."""
+    points = [point.copy() for point in np.asarray(coordinates, dtype=float)]
+    sampled_edges = []
+    step = 0.5 * float(np.min(spacing))
+    for u, v in np.asarray(edges, dtype=int).reshape(-1, 2):
+        length = np.linalg.norm((points[v] - points[u]) * spacing)
+        pieces = max(1, int(np.ceil(length / step)))
+        previous = int(u)
+        for part in range(1, pieces):
+            points.append(points[u] + part * (points[v] - points[u]) / pieces)
+            current = len(points) - 1
+            sampled_edges.append((previous, current))
+            previous = current
+        sampled_edges.append((previous, int(v)))
+    return (
+        np.asarray(points, dtype=float),
+        np.asarray(sampled_edges, dtype=int).reshape(-1, 2),
+    )
+
+
+def _box_in_foreground(points, mask):
+    """Conservatively certify a box covering a moving graph edge."""
+    lower = np.ceil(np.min(points, axis=0) - 0.5 - 1e-10).astype(int)
+    upper = np.floor(np.max(points, axis=0) + 0.5 + 1e-10).astype(int)
+    if np.any(lower < 0) or np.any(upper >= mask.shape):
+        return False
+    return bool(np.all(mask[tuple(slice(a, b + 1) for a, b in zip(lower, upper))]))
+
+
+def _triangle_enters_voxel(triangle, voxel):
+    """Clip a swept triangle against the open interior of one voxel cube."""
+    polygon = [point for point in triangle]
+    epsilon = 1e-10
+    for axis in range(3):
+        for sign, boundary in (
+            (1.0, voxel[axis] - 0.5 + epsilon),
+            (-1.0, voxel[axis] + 0.5 - epsilon),
+        ):
+            if not polygon:
+                return False
+            clipped = []
+            for start, end in zip(polygon, polygon[1:] + polygon[:1]):
+                first = sign * (start[axis] - boundary)
+                second = sign * (end[axis] - boundary)
+                if first > 0:
+                    clipped.append(start)
+                if (first > 0) != (second > 0):
+                    fraction = first / (first - second)
+                    clipped.append(start + fraction * (end - start))
+            polygon = clipped
+    return bool(polygon)
+
+
+def _sweep_contained(old_start, old_end, new_start, new_end, mask):
+    """Certify the swept edge by recursively covering its triangles with voxels."""
+    triangles = (
+        np.asarray([old_start, old_end, new_start]),
+        np.asarray([new_start, old_end, new_end]),
+    )
+
+    def contained(triangle, remaining):
+        if _box_in_foreground(triangle, mask):
+            return True
+        lower = np.ceil(np.min(triangle, axis=0) - 0.5 - 1e-10).astype(int)
+        upper = np.floor(np.max(triangle, axis=0) + 0.5 + 1e-10).astype(int)
+        volume = int(np.prod(upper - lower + 1))
+        if remaining == 0 or volume <= 8:
+            probes = list(triangle)
+            probes += [
+                0.5 * (triangle[a] + triangle[b])
+                for a, b in ((0, 1), (1, 2), (2, 0))
+            ]
+            probes.append(np.mean(triangle, axis=0))
+            try:
+                for point in probes:
+                    _foreground_voxel(point, mask.shape, mask)
+            except ValueError:
+                return False
+            for voxel in product(*(range(a, b + 1) for a, b in zip(lower, upper))):
+                if (
+                    (
+                        any(
+                            value < 0 or value >= bound
+                            for value, bound in zip(voxel, mask.shape)
+                        )
+                        or not mask[voxel]
+                    )
+                    and _triangle_enters_voxel(triangle, voxel)
+                ):
+                    return False
+            return True
+        pairs = ((0, 1), (1, 2), (2, 0))
+        a, b = max(
+            pairs,
+            key=lambda pair: np.linalg.norm(
+                triangle[pair[0]] - triangle[pair[1]]
+            ),
+        )
+        c = 3 - a - b
+        middle = 0.5 * (triangle[a] + triangle[b])
+        return (
+            contained(np.asarray([triangle[a], middle, triangle[c]]), remaining - 1)
+            and contained(
+                np.asarray([middle, triangle[b], triangle[c]]), remaining - 1
+            )
+        )
+
+    return all(contained(triangle, 10) for triangle in triangles)
+
+
+def _nonincident_intersections(coordinates, edges, spacing):
+    """Detect unrepresented crossings and overlap beyond shared endpoints."""
+    physical = np.asarray(coordinates, dtype=float) * spacing
+    edges = np.asarray(edges, dtype=int).reshape(-1, 2)
+    tolerance = 1e-8 * float(np.min(spacing))
+    if not len(edges):
+        return False
+    midpoints = np.mean(physical[edges], axis=1)
+    radii = 0.5 * np.linalg.norm(physical[edges[:, 0]] - physical[edges[:, 1]], axis=1)
+    tree = cKDTree(midpoints)
+    for index, (u, v) in enumerate(edges):
+        p, q = physical[[u, v]]
+        candidates = tree.query_ball_point(
+            midpoints[index], radii[index] + np.max(radii) + tolerance
+        )
+        for other_index in candidates:
+            if other_index <= index:
+                continue
+            a, b = edges[other_index]
+            shared = {int(u), int(v)} & {int(a), int(b)}
+            if shared:
+                if len(shared) == 1:
+                    junction = shared.pop()
+                    first = physical[v if u == junction else u] - physical[junction]
+                    second = physical[b if a == junction else a] - physical[junction]
+                    if (
+                        first @ second > 0
+                        and np.linalg.norm(np.cross(first, second))
+                        <= tolerance * max(
+                            np.linalg.norm(first), np.linalg.norm(second)
+                        )
+                    ):
+                        return True
+                continue
+            r, s = physical[[a, b]]
+            if np.any(np.maximum(np.minimum(p, q), np.minimum(r, s)) >
+                      np.minimum(np.maximum(p, q), np.maximum(r, s)) + tolerance):
+                continue
+            first, second = q - p, s - r
+            difference = p - r
+            aa, bb, cc = first @ first, first @ second, second @ second
+            dd, ee = first @ difference, second @ difference
+            determinant = aa * cc - bb * bb
+            if determinant > tolerance ** 4:
+                t = np.clip((bb * ee - cc * dd) / determinant, 0.0, 1.0)
+            else:
+                t = 0.0
+            w = np.clip((bb * t + ee) / cc, 0.0, 1.0) if cc else 0.0
+            t = np.clip((bb * w - dd) / aa, 0.0, 1.0) if aa else 0.0
+            def endpoint_distance(point, start, end):
+                direction = end - start
+                length_squared = direction @ direction
+                fraction = (
+                    np.clip(((point - start) @ direction) / length_squared, 0.0, 1.0)
+                    if length_squared else 0.0
+                )
+                return np.linalg.norm(point - start - fraction * direction)
+
+            if min(
+                np.linalg.norm(p + t * first - r - w * second),
+                endpoint_distance(p, r, s),
+                endpoint_distance(q, r, s),
+                endpoint_distance(r, p, q),
+                endpoint_distance(s, p, q),
+            ) <= tolerance:
+                return True
+    return False
+
+
+def _valid_graph_update(old, proposed, edges, mask, spacing):
+    """Check containment, deformation sweep and unintended crossings."""
+    try:
+        for point in proposed:
+            _foreground_voxel(point, mask.shape, mask)
+        for u, v in edges:
+            _edge_voxels(proposed[u], proposed[v], mask.shape, mask)
+            if not _sweep_contained(old[u], old[v], proposed[u], proposed[v], mask):
+                return False
+    except ValueError:
+        return False
+    return not _nonincident_intersections(proposed, edges, spacing)
+
+
+def _terminal_anchors(mask, edt, spacing):
+    """Retain one medial voxel at each narrow end face of an elongated branch."""
+    anchors = np.zeros_like(mask, dtype=bool)
+    labels, count = ndimage.label(
+        mask, structure=np.ones((3, 3, 3), dtype=bool)
+    )
+    for label in range(1, count + 1):
+        component = labels == label
+        points = np.argwhere(component)
+        extents = np.ptp(points, axis=0) + 1
+        if not any(
+            extents[axis] >= 4 and extents[axis] >= 1.5 * min(
+                extents[other] for other in range(3) if other != axis
+            )
+            for axis in range(3)
+        ):
+            continue
+        if foreground_topology(component)[1]:
+            continue
+        for axis in range(3):
+            if extents[axis] < 4 or extents[axis] < 1.5 * min(
+                extents[other] for other in range(3) if other != axis
+            ):
+                continue
+            faces = [
+                points[points[:, axis] == value]
+                for value in (np.min(points[:, axis]), np.max(points[:, axis]))
+            ]
+            narrow = min(len(face) for face in faces)
+            for face in faces:
+                if len(face) > 2 * narrow:
+                    continue
+                radii = edt[tuple(face.T)]
+                best = face[np.isclose(radii, np.max(radii), rtol=0.0, atol=1e-12)]
+                centre = np.mean(face, axis=0)
+                choice = np.argmin(np.sum(((best - centre) * spacing) ** 2, axis=1))
+                anchors[tuple(best[choice])] = True
+    return anchors
+
+
+def _skeleton_state(mask, guidance, anchors=None):
+    voxels = _thin_foreground(mask, guidance, protected=anchors).astype(int)
     edges, _ = _tunnel_graph(voxels)
     return voxels, edges, branch_complex_signature(voxels, edges)
-
-
-def _rasterize_paths(paths, mask):
-    """Rasterize fitted polylines and return their unique foreground voxels."""
-    output = np.zeros_like(mask, dtype=bool)
-    for path in paths.values():
-        for start, end in zip(path[:-1], path[1:]):
-            for voxel in _edge_voxels(start, end, mask.shape, mask):
-                output[voxel] = True
-    return output, np.argwhere(output)
-
-
-def _rasterize_edges(coordinates, edges, mask):
-    paths = {
-        (int(u), int(v)): coordinates[[u, v]] for u, v in np.asarray(edges)
-    }
-    return _rasterize_paths(paths, mask)[0]
 
 
 def _critical_branch_data(coordinates, edges, edt, spacing):
@@ -156,8 +374,20 @@ def fit_branch_complex(
     max_iterations=20,
 ):
     """Jointly centre and smooth branches while retaining the discrete complex."""
-    coordinates = np.asarray(skeleton_voxels, dtype=float)
-    edges = np.asarray(skeleton_edges, dtype=int).reshape(-1, 2)
+    coordinates, edges = _resample_edges(skeleton_voxels, skeleton_edges, spacing)
+    try:
+        for point in coordinates:
+            _foreground_voxel(point, original_mask.shape, original_mask)
+        for u, v in edges:
+            _edge_voxels(
+                coordinates[u], coordinates[v], original_mask.shape, original_mask
+            )
+    except ValueError as error:
+        raise RuntimeError(
+            'No contained initial graph geometry is available.'
+        ) from error
+    if _nonincident_intersections(coordinates, edges, spacing):
+        raise RuntimeError('Initial graph geometry contains an unintended crossing.')
     adjacency = _adjacency_from_edges(len(coordinates), edges)
     degree = adjacency.getnnz(axis=1)
     reference = np.asarray(reference_voxels, dtype=float)
@@ -169,12 +399,12 @@ def fit_branch_complex(
         raise RuntimeError(
             'Final skeleton no longer matches the reference branch complex.'
         )
-    ref_degree, _, ref_radii, ref_lengths = _critical_branch_data(
-        reference, reference_edges, original_edt, spacing
+    anchors = coordinates.copy()
+    critical_degree, _, critical_radii, critical_lengths = _critical_branch_data(
+        np.asarray(skeleton_voxels, dtype=float), skeleton_edges, original_edt, spacing
     )
-    expected_topology = foreground_topology(original_mask)
-
     stable = False
+    rejected_updates = 0
     for _ in range(max_iterations):
         local_radii = ndimage.map_coordinates(
             original_edt, coordinates.T, order=1, mode='nearest'
@@ -189,54 +419,34 @@ def fit_branch_complex(
         neighbour_mean = neighbour_sum / np.maximum(degree[:, None], 1)
         proposal = 0.4 * ridge + 0.6 * neighbour_mean
 
-        # Critical points move from their preliminary reference only within the
-        # agreed radius- and branch-length-scaled cumulative caps.
-        for current_index, reference_index in mapping.items():
-            reference_position = reference[reference_index]
-            radius = ref_radii[reference_index]
-            branch_length = ref_lengths[reference_index]
-            coefficient = 0.25 if ref_degree[reference_index] == 1 else 0.5
+        # Retain the longitudinal endpoint/branch cap while allowing transverse
+        # displacement to the centre of an even-width EDT plateau.
+        for current_index in mapping:
+            reference_position = anchors[current_index]
+            radius = critical_radii[current_index]
+            branch_length = critical_lengths[current_index]
+            coefficient = 0.25 if critical_degree[current_index] == 1 else 0.5
             cap = min(coefficient * radius, 0.2 * branch_length)
             displacement = (proposal[current_index] - reference_position) * spacing
-            norm = np.linalg.norm(displacement)
-            if norm > cap > 0:
-                proposal[current_index] = (
-                    reference_position + displacement * (cap / norm) / spacing
-                )
+            direction = tangents[current_index]
+            norm = np.linalg.norm(direction)
+            if norm:
+                axial = float(displacement @ (direction / norm))
+                displacement -= (axial - np.clip(axial, -cap, cap)) * direction / norm
+                proposal[current_index] = reference_position + displacement / spacing
             elif cap == 0:
                 proposal[current_index] = reference_position
 
-        # A proposed joint update is accepted only where every incident straight
-        # segment remains inside the original foreground voxel complex.
-        accepted = proposal.copy()
-        for _ in range(len(coordinates) + 1):
-            rejected = set()
-            for vertex, point in enumerate(accepted):
-                try:
-                    _foreground_voxel(point, original_mask.shape, original_mask)
-                except ValueError:
-                    rejected.add(vertex)
-            for u, v in edges:
-                try:
-                    _edge_voxels(
-                        accepted[u], accepted[v], original_mask.shape, original_mask
-                    )
-                except ValueError:
-                    rejected.update((int(u), int(v)))
-            if not rejected:
-                break
-            accepted[list(rejected)] = coordinates[list(rejected)]
+        accepted = coordinates
+        accepted_trial = False
         for fraction in (1.0, 0.5, 0.25, 0.125):
-            trial = coordinates + fraction * (accepted - coordinates)
-            try:
-                trial_mask = _rasterize_edges(trial, edges, original_mask)
-            except ValueError:
-                continue
-            if foreground_topology(trial_mask) == expected_topology:
+            trial = coordinates + fraction * (proposal - coordinates)
+            if _valid_graph_update(coordinates, trial, edges, original_mask, spacing):
                 accepted = trial
+                accepted_trial = True
                 break
-        else:
-            accepted = coordinates
+        if not accepted_trial:
+            rejected_updates += 1
         movement = np.max(np.linalg.norm((accepted - coordinates) * spacing, axis=1))
         coordinates = accepted
         if movement < 0.05 * float(np.min(spacing)):
@@ -262,6 +472,7 @@ def fit_branch_complex(
     )
     diagnostics = {
         'stable': stable,
+        'fallback': bool(rejected_updates),
         'ridge_satisfied': bool(np.all(ridge_distance <= ridge_tolerance)),
         'mean_ridge_distance': float(np.mean(ridge_distance)),
         'max_ridge_distance': float(np.max(ridge_distance)),
@@ -269,6 +480,14 @@ def fit_branch_complex(
     coordinates, simplified_edges, paths = _simplify_paths(
         coordinates, edges, original_mask, merge_tolerance
     )
+    fitted_signature = branch_complex_signature(coordinates, simplified_edges)
+    if fitted_signature != branch_complex_signature(reference, reference_edges):
+        raise RuntimeError('Graph fitting changed the reference branch complex.')
+    for point in coordinates:
+        _foreground_voxel(point, original_mask.shape, original_mask)
+    for path in paths.values():
+        for start, end in zip(path[:-1], path[1:]):
+            _edge_voxels(start, end, original_mask.shape, original_mask)
     return (
         coordinates,
         _adjacency_from_edges(len(coordinates), simplified_edges),
@@ -313,11 +532,17 @@ def alternating_graph_skeletonisation(
     original_edt = ndimage.distance_transform_edt(
         np.pad(foreground, 1), sampling=spacing
     )[1:-1, 1:-1, 1:-1]
+    anchors = _terminal_anchors(foreground, original_edt, spacing)
     initial = np.argwhere(foreground).astype(float)
     topology_guidance = initial.copy()
     reference_voxels, reference_edges, reference_signature = _skeleton_state(
-        foreground, topology_guidance
+        foreground, topology_guidance, anchors
     )
+    reference_mask = np.zeros_like(foreground)
+    reference_mask[tuple(reference_voxels.T)] = True
+    original_topology = foreground_topology(foreground)[:2]
+    if foreground_topology(reference_mask)[:2] != original_topology:
+        raise RuntimeError('Reference digital skeleton changed foreground topology.')
     working = foreground.copy()
     previous_voxels = None
     previous_guide = None
@@ -367,7 +592,7 @@ def alternating_graph_skeletonisation(
         guide = 0.5 * contracted + 0.5 * ridge_targets
         def preserves_reference(candidate):
             return (
-                _skeleton_state(candidate, topology_guidance)[2]
+                _skeleton_state(candidate, topology_guidance, anchors)[2]
                 == reference_signature
             )
 
@@ -377,22 +602,29 @@ def alternating_graph_skeletonisation(
             original_edt,
             spacing,
             validator=preserves_reference,
+            protected=anchors,
         )
         proposed_voxels, proposed_edges, proposed_signature = _skeleton_state(
-            proposed, topology_guidance
+            proposed, topology_guidance, anchors
         )
         if proposed_signature != reference_signature:
             raise RuntimeError('A validated thinning sweep changed the branch complex.')
+        candidate_mask = np.zeros_like(foreground)
+        candidate_mask[tuple(proposed_voxels.T)] = True
+        if foreground_topology(candidate_mask)[:2] != original_topology:
+            raise RuntimeError(
+                'Candidate digital skeleton changed foreground topology.'
+            )
         last_skeleton_voxels = proposed_voxels
         last_skeleton_edges = proposed_edges
         if deleted == 0:
             previous_voxels, previous_guide = voxels, guide
             if np.count_nonzero(working) == len(last_skeleton_voxels):
-                outcome = 'converged'
+                outcome = 'digital-complete'
                 break
             stagnant_cycles += 1
             if stagnant_cycles >= 5:
-                outcome = 'feature-limited'
+                outcome = 'stagnated'
                 break
             print(
                 f'Alternating cycle {cycle + 1}/{max_cycles}: no accepted '
@@ -433,27 +665,21 @@ def alternating_graph_skeletonisation(
         spacing,
         merge_tolerance,
     )
-    output_mask, output_voxels = _rasterize_paths(paths, foreground)
-    if foreground_topology(output_mask) != foreground_topology(foreground):
-        warnings.warn(
-            'Continuous fitting changed the rasterized foreground topology; using '
-            'the last valid digital geometry.',
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        discrete = skeleton_voxels.astype(float)
-        coordinates, simplified_edges, paths = _simplify_paths(
-            discrete, skeleton_edges, foreground, merge_tolerance
-        )
-        adjacency = _adjacency_from_edges(len(coordinates), simplified_edges)
-        output_voxels = skeleton_voxels
-        diagnostics['stable'] = False
-    if not diagnostics['stable']:
-        outcome = 'budget-limited'
-    elif not diagnostics['ridge_satisfied']:
-        outcome = 'feature-limited'
+    output_mask = np.zeros_like(foreground)
+    output_mask[tuple(skeleton_voxels.T)] = True
+    if foreground_topology(output_mask)[:2] != original_topology:
+        raise RuntimeError('Digital skeleton changed foreground components or tunnels.')
+    output_voxels = skeleton_voxels
+    geometry_outcome = (
+        'validated-fallback' if diagnostics['fallback']
+        else 'stable' if diagnostics['stable'] and diagnostics['ridge_satisfied']
+        else 'feature-limited' if diagnostics['stable'] else 'fit-budget-limited'
+    )
+    if outcome == 'digital-complete' and geometry_outcome == 'stable':
+        outcome = 'converged'
     print(
-        f'Alternating skeletonisation {outcome}: {len(coordinates)} graph nodes, '
+        f'Alternating digital {outcome}; graph geometry {geometry_outcome}: '
+        f'{len(coordinates)} graph nodes, '
         f'{adjacency.nnz // 2} edges; mean/max ridge distance '
         f'{diagnostics["mean_ridge_distance"]:.4g}/'
         f'{diagnostics["max_ridge_distance"]:.4g} physical units.'

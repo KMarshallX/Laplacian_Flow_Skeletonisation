@@ -71,6 +71,12 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        '--contraction_steps',
+        type=_positive_integer,
+        default=5,
+        help='Maximum contraction iterations per --alternating cycle [Default=5].',
+    )
+    optional.add_argument(
         '--use_edt',
         action='store_true',
         help=(

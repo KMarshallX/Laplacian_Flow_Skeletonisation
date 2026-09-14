@@ -76,6 +76,7 @@ def thin_foreground_sweep(
     spacing=(1.0, 1.0, 1.0),
     validator=None,
     validation_batch=64,
+    protected=None,
 ):
     """Delete one frozen boundary layer using topology-safe sequential checks.
 
@@ -89,6 +90,11 @@ def thin_foreground_sweep(
     spacing = np.asarray(spacing, dtype=float)
     if foreground.ndim != 3 or edt.shape != foreground.shape:
         raise ValueError('mask and reference_edt must be matching 3D arrays.')
+    protected = np.zeros_like(foreground) if protected is None else np.asarray(
+        protected, dtype=bool
+    )
+    if protected.shape != foreground.shape or np.any(protected & ~foreground):
+        raise ValueError('protected voxels must be contained in the working mask.')
     if guide.ndim != 2 or guide.shape[1] != 3 or not len(guide):
         raise ValueError('guidance must have shape (N, 3) with at least one point.')
     if spacing.shape != (3,) or np.any(spacing <= 0) or np.any(~np.isfinite(spacing)):
@@ -116,11 +122,12 @@ def thin_foreground_sweep(
     if validation_batch < 1:
         raise ValueError('validation_batch must be positive.')
     work = np.pad(foreground, 1)
+    protected_work = np.pad(protected, 1)
     deleted = 0
 
     def try_delete(candidate):
         position = tuple(candidate)
-        if not work[position]:
+        if not work[position] or protected_work[position]:
             return False
         patch = work[tuple(slice(value - 1, value + 2) for value in candidate)]
         # Retaining the last neighbour of a tip explicitly preserves terminal stubs.
@@ -150,9 +157,14 @@ def thin_foreground_sweep(
     return work[1:-1, 1:-1, 1:-1], deleted
 
 
-def _thin_foreground(mask, guidance):
+def _thin_foreground(mask, guidance, protected=None):
     """Peel simple voxels from the boundary inward, retaining curve endpoints."""
     work = np.pad(np.asarray(mask, dtype=bool), 1)
+    protected_work = np.pad(
+        np.zeros_like(mask, dtype=bool) if protected is None else protected, 1
+    )
+    if protected_work.shape != work.shape or np.any(protected_work & ~work):
+        raise ValueError('protected voxels must be contained in the working mask.')
     coordinates = np.argwhere(work)
     distance = ndimage.distance_transform_edt(work)
     guide_distance = cKDTree(guidance).query(coordinates - 1)[0]
@@ -166,7 +178,7 @@ def _thin_foreground(mask, guidance):
     while queue:
         _, p = heapq.heappop(queue)
         queued.remove(p)
-        if not work[p]:
+        if not work[p] or protected_work[p]:
             continue
         patch = work[tuple(slice(v - 1, v + 2) for v in p)]
         # A curve tip may be simple but deleting it shortens a branch.

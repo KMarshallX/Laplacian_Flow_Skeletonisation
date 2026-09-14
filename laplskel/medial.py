@@ -5,6 +5,8 @@ import heapq
 import numpy as np
 from scipy import ndimage
 
+from .utils import _foreground_voxel
+
 
 def compute_medialness(edt_volume, node_coords, threshold=0.8):
     """
@@ -134,8 +136,10 @@ def transverse_edt_targets(
     """Find a nearby high-EDT target in each point's transverse plane.
 
     EDT is sampled from the original foreground. The search radius is the larger
-    of two minimum voxel spacings and the EDT radius at the current point. Candidate
-    ties are resolved by proximity, which gives a continuous branch preference.
+    of two minimum voxel spacings and the EDT radius at the current point.
+    Equal-valued local ridge voxels form a plateau. Its connected transverse part
+    within the current foreground component is centred before the displacement
+    is projected off the branch tangent.
     """
     edt = np.asarray(edt_volume, dtype=float)
     mask = np.asarray(foreground, dtype=bool)
@@ -153,16 +157,19 @@ def transverse_edt_targets(
     targets = points.copy()
     h = float(np.min(spacing))
     bounds = np.asarray(mask.shape)
+    components = ndimage.label(mask, structure=np.ones((3, 3, 3), dtype=bool))[0]
     for index, (point, tangent, radius) in enumerate(
         zip(points, directions, sampled_radius)
     ):
+        component = components[_foreground_voxel(point, mask.shape, mask)]
         search_radius = max(2.0 * h, float(radius))
         voxel_radius = np.ceil(search_radius / spacing).astype(int)
         centre = np.rint(point).astype(int)
         lower = np.maximum(centre - voxel_radius, 0)
         upper = np.minimum(centre + voxel_radius + 1, bounds)
+        region = tuple(slice(a, b) for a, b in zip(lower, upper))
         candidates = np.argwhere(
-            mask[tuple(slice(a, b) for a, b in zip(lower, upper))]
+            mask[region] & (components[region] == component)
         ) + lower
         if not len(candidates):
             continue
@@ -183,5 +190,28 @@ def transverse_edt_targets(
         values = edt[tuple(candidates.T)]
         best_value = np.max(values)
         best = np.flatnonzero(np.isclose(values, best_value, rtol=0.0, atol=1e-12))
-        targets[index] = candidates[best[np.argmin(radial[best])]]
+        tied = candidates[best]
+        seed = int(np.argmin(radial[best]))
+        connected = {seed}
+        frontier = [seed]
+        while frontier:
+            current = frontier.pop()
+            neighbours = np.flatnonzero(
+                np.max(np.abs(tied - tied[current]), axis=1) <= 1
+            )
+            for neighbour in neighbours:
+                neighbour = int(neighbour)
+                if neighbour not in connected:
+                    connected.add(neighbour)
+                    frontier.append(neighbour)
+        target = np.mean(tied[sorted(connected)], axis=0)
+        if tangent_norm > 0:
+            unit = tangent / tangent_norm
+            displacement = (target - point) * spacing
+            target = point + (displacement - unit * (displacement @ unit)) / spacing
+        try:
+            _foreground_voxel(target, mask.shape, mask)
+        except ValueError:
+            target = tied[seed].astype(float)
+        targets[index] = target
     return targets
