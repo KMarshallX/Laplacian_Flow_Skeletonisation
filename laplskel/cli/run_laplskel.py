@@ -125,6 +125,15 @@ def _get_parser():
         help='Baseline structural anchor retention weight variable.',
     )
     optional.add_argument(
+        '--retention_ratio',
+        type=float,
+        default=5.0,
+        help=(
+            'Post-thinning endpoint/junction retention multiplier relative to --w_H. '
+            'Must be >=1; squared in the fit. Default workflow only [Default=5].'
+        ),
+    )
+    optional.add_argument(
         '--w_H_medial',
         dest='w_H_medial',
         type=float,

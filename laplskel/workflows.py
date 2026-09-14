@@ -42,6 +42,7 @@ def laplacian_skeletonisation(
     merge_tolerance=0.25,
     alternating=False,
     contraction_steps=5,
+    retention_ratio=5.0,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -125,6 +126,9 @@ def laplacian_skeletonisation(
     contraction_steps : int, optional
         Maximum contraction steps per alternating cycle. Default is 5; ignored
         by the established non-alternating workflow.
+    retention_ratio : float, optional
+        Post-thinning endpoint/junction retention multiplier relative to w_H_base.
+        Default 5; used by the default workflow.
 
     Returns
     -------
@@ -140,6 +144,10 @@ def laplacian_skeletonisation(
     ValueError
         If the loaded structural NIfTI mask image is completely empty or lacks foreground elements.
     """
+    if not np.isfinite(retention_ratio) or retention_ratio < 1:
+        raise ValueError('retention_ratio must be finite and >= 1.')
+    if not alternating and (not np.isfinite(w_H_base) or w_H_base <= 0):
+        raise ValueError('w_H_base must be positive for post-thinning retention.')
     if not np.isfinite(merge_tolerance) or merge_tolerance < 0:
         raise ValueError('merge_tolerance must be finite and >= 0.')
     if alternating and (
@@ -188,6 +196,7 @@ def laplacian_skeletonisation(
         alternating,
         img.header.get_zooms()[:3],
         contraction_steps,
+        retention_ratio,
     )
 
     print('Reuniting results from parallel jobs.')
@@ -268,7 +277,7 @@ def laplacian_skeletonisation(
             affine=img.affine,
             volume_shape=volume_data.shape,
             output_path=f'{out_path}.graphml',
-            binary_segmentation=volume_data if alternating else nifti_skel,
+            binary_segmentation=volume_data,
             edge_paths=edge_paths,
         )
     else:
