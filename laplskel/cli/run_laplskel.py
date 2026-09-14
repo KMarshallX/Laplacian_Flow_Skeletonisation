@@ -63,6 +63,20 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        '--alternating',
+        action='store_true',
+        help=(
+            'Use the experimental fixed-schedule contraction/thinning workflow '
+            'with original-foreground EDT ridge guidance.'
+        ),
+    )
+    optional.add_argument(
+        '--contraction_steps',
+        type=_positive_integer,
+        default=5,
+        help='Maximum contraction iterations per --alternating cycle [Default=5].',
+    )
+    optional.add_argument(
         '--use_edt',
         action='store_true',
         help=(
@@ -109,6 +123,15 @@ def _get_parser():
         type=float,
         default=0.5,
         help='Baseline structural anchor retention weight variable.',
+    )
+    optional.add_argument(
+        '--retention_ratio',
+        type=float,
+        default=5.0,
+        help=(
+            'Post-thinning endpoint/junction retention multiplier relative to --w_H. '
+            'Must be >=1; squared in the fit. Default workflow only [Default=5].'
+        ),
     )
     optional.add_argument(
         '--w_H_medial',
