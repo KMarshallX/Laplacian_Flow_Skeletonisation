@@ -34,7 +34,8 @@ def _process_single_label(
     alternating=False,
     voxel_spacing=(1.0, 1.0, 1.0),
     contraction_steps=5,
-    retention_ratio=5.0,
+    alter_init_thinning=False,
+    dev_contra_graph=False,
 ):
     """
     Worker function to process a single connected component label.
@@ -94,9 +95,11 @@ def _process_single_label(
         Physical voxel spacing used by EDT and geometric-distance calculations.
     contraction_steps : int, optional
         Maximum contraction iterations per alternating cycle. Default is 5.
-    retention_ratio : float, optional
-        Post-thinning endpoint/junction retention multiplier relative to w_H_base.
-        Default 5; used by the default workflow.
+    alter_init_thinning : bool, optional
+        Enable initial branch references and constrained alternating geometry.
+        Default False; ignored by the default workflow.
+    dev_contra_graph : bool, optional
+        Append pre-refinement coordinates and adjacency in the default workflow.
 
     Returns
     -------
@@ -110,19 +113,28 @@ def _process_single_label(
         Digital skeleton coordinates in the global volume.
     edge_paths : dict
         Fitted edge polylines in global coordinates, before sampling reduction.
+    intermediate_X, intermediate_adj : numpy.ndarray, scipy.sparse.csr_matrix
+        Appended only when dev_contra_graph is enabled in the default workflow.
+        Global coordinates and adjacency before refinement; components with at
+        most three voxels retain their initial graph because contraction is skipped.
     """
     X_init_local = np.argwhere(cropped_label).astype(np.uint16)
+    intermediate = ()
+    if dev_contra_graph and not alternating and len(X_init_local) <= 3:
+        intermediate = (
+            X_init_local + np.array(offset_origin, dtype=np.float32),
+            compute_sparse_adjacency_matrix(KDTree(X_init_local), init_graph_adj),
+        )
     # Skip small noise components
-    if len(X_init_local) <= 3 and not alternating:
+    if len(X_init_local) <= 3 and (not alternating or alter_init_thinning):
         refined, adj_sparse, voxels, paths = refine_graph(
-            cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True,
-            w_L=w_L, w_H_base=w_H_base, retention_ratio=retention_ratio, tol=tol,
+            cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True
         )
         X_init_global = refined + np.array(offset_origin, dtype=np.float32)
         return (
             label_id, X_init_global, adj_sparse, voxels + offset_origin,
             {edge: path + offset_origin for edge, path in paths.items()},
-        )
+        ) + intermediate
 
     print(
         f'\n--- Processing Label {label_id}/{num_features} ({X_init_local.sum()} voxels) ---'
@@ -133,6 +145,7 @@ def _process_single_label(
             cropped_label,
             spacing=voxel_spacing,
             contraction_steps=contraction_steps,
+            alter_init_thinning=alter_init_thinning,
             use_anisotropic=use_anisotropic,
             w_L=w_L,
             w_H_base=w_H_base,
@@ -166,16 +179,21 @@ def _process_single_label(
             solver=solver,
         )
 
+        if dev_contra_graph:
+            intermediate = (
+                label_X_local + np.array(offset_origin, dtype=np.float32),
+                label_adj.copy(),
+            )
+
         label_X_local, label_adj, voxels, paths = refine_graph(
-            cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True,
-            w_L=w_L, w_H_base=w_H_base, retention_ratio=retention_ratio, tol=tol,
+            cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True
         )
     label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
 
     return (
         label_id, label_X_global, label_adj, voxels + offset_origin,
         {edge: path + offset_origin for edge, path in paths.items()},
-    )
+    ) + intermediate
 
 
 def _padded_component_crop(labeled_volume, label_id, bounding_box):
@@ -207,7 +225,8 @@ def process_components(
     alternating=False,
     voxel_spacing=(1.0, 1.0, 1.0),
     contraction_steps=5,
-    retention_ratio=5.0,
+    alter_init_thinning=False,
+    dev_contra_graph=False,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -257,7 +276,8 @@ def process_components(
                 alternating,
                 voxel_spacing,
                 contraction_steps,
-                retention_ratio,
+                alter_init_thinning,
+                dev_contra_graph,
             )
         )
 

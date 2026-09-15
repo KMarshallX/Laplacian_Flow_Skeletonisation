@@ -132,6 +132,7 @@ def transverse_edt_targets(
     coordinates,
     tangents,
     spacing=(1.0, 1.0, 1.0),
+    enforce_containment=True,
 ):
     """Find a nearby high-EDT target in each point's transverse plane.
 
@@ -139,7 +140,9 @@ def transverse_edt_targets(
     of two minimum voxel spacings and the EDT radius at the current point.
     Equal-valued local ridge voxels form a plateau. Its connected transverse part
     within the current foreground component is centred before the displacement
-    is projected off the branch tangent.
+    is projected off the branch tangent. With enforce_containment=False,
+    points may be outside the mask, targets may cross component boundaries,
+    and projected targets are not forced back into foreground.
     """
     edt = np.asarray(edt_volume, dtype=float)
     mask = np.asarray(foreground, dtype=bool)
@@ -157,20 +160,27 @@ def transverse_edt_targets(
     targets = points.copy()
     h = float(np.min(spacing))
     bounds = np.asarray(mask.shape)
-    components = ndimage.label(mask, structure=np.ones((3, 3, 3), dtype=bool))[0]
+    components = (
+        ndimage.label(mask, structure=np.ones((3, 3, 3), dtype=bool))[0]
+        if enforce_containment else None
+    )
     for index, (point, tangent, radius) in enumerate(
         zip(points, directions, sampled_radius)
     ):
-        component = components[_foreground_voxel(point, mask.shape, mask)]
+        component = (
+            components[_foreground_voxel(point, mask.shape, mask)]
+            if enforce_containment else None
+        )
         search_radius = max(2.0 * h, float(radius))
         voxel_radius = np.ceil(search_radius / spacing).astype(int)
         centre = np.rint(point).astype(int)
-        lower = np.maximum(centre - voxel_radius, 0)
-        upper = np.minimum(centre + voxel_radius + 1, bounds)
+        lower = np.clip(centre - voxel_radius, 0, bounds)
+        upper = np.clip(centre + voxel_radius + 1, 0, bounds)
         region = tuple(slice(a, b) for a, b in zip(lower, upper))
-        candidates = np.argwhere(
-            mask[region] & (components[region] == component)
-        ) + lower
+        eligible_mask = mask[region]
+        if enforce_containment:
+            eligible_mask = eligible_mask & (components[region] == component)
+        candidates = np.argwhere(eligible_mask) + lower
         if not len(candidates):
             continue
         offsets = (candidates - point) * spacing
@@ -209,9 +219,10 @@ def transverse_edt_targets(
             unit = tangent / tangent_norm
             displacement = (target - point) * spacing
             target = point + (displacement - unit * (displacement @ unit)) / spacing
-        try:
-            _foreground_voxel(target, mask.shape, mask)
-        except ValueError:
-            target = tied[seed].astype(float)
+        if enforce_containment:
+            try:
+                _foreground_voxel(target, mask.shape, mask)
+            except ValueError:
+                target = tied[seed].astype(float)
         targets[index] = target
     return targets

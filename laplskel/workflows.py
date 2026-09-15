@@ -42,7 +42,8 @@ def laplacian_skeletonisation(
     merge_tolerance=0.25,
     alternating=False,
     contraction_steps=5,
-    retention_ratio=5.0,
+    alter_init_thinning=False,
+    dev_contra_graph=False,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -126,9 +127,16 @@ def laplacian_skeletonisation(
     contraction_steps : int, optional
         Maximum contraction steps per alternating cycle. Default is 5; ignored
         by the established non-alternating workflow.
-    retention_ratio : float, optional
-        Post-thinning endpoint/junction retention multiplier relative to w_H_base.
-        Default 5; used by the default workflow.
+    alter_init_thinning : bool, optional
+        Enable the initial branch reference, reference checks, critical-node
+        movement caps and containment in alternating mode. Default False.
+        Without it, thinning retains local topology and tip protection, while
+        fitted geometry is unconstrained. Ignored by the default workflow.
+
+    dev_contra_graph : bool, optional
+        Also export the contracted graph before thinning as
+        <output_stem>_intermediate.graphml beside the normal outputs.
+        Ignored in alternating mode.
 
     Returns
     -------
@@ -144,10 +152,6 @@ def laplacian_skeletonisation(
     ValueError
         If the loaded structural NIfTI mask image is completely empty or lacks foreground elements.
     """
-    if not np.isfinite(retention_ratio) or retention_ratio < 1:
-        raise ValueError('retention_ratio must be finite and >= 1.')
-    if not alternating and (not np.isfinite(w_H_base) or w_H_base <= 0):
-        raise ValueError('w_H_base must be positive for post-thinning retention.')
     if not np.isfinite(merge_tolerance) or merge_tolerance < 0:
         raise ValueError('merge_tolerance must be finite and >= 0.')
     if alternating and (
@@ -196,7 +200,8 @@ def laplacian_skeletonisation(
         alternating,
         img.header.get_zooms()[:3],
         contraction_steps,
-        retention_ratio,
+        alter_init_thinning,
+        dev_contra_graph,
     )
 
     print('Reuniting results from parallel jobs.')
@@ -210,7 +215,7 @@ def laplacian_skeletonisation(
     # Keep the digital reference and edge paths: rounding simplified straight
     # segments can create extra voxel loops even when graph topology is correct.
     digital_voxels = np.vstack([res[3] for res in results])
-    if alternating and (
+    if alternating and alter_init_thinning and (
         np.any(digital_voxels < 0)
         or np.any(digital_voxels >= volume_data.shape)
         or not np.all(volume_data[tuple(digital_voxels.astype(int).T)])
@@ -226,7 +231,7 @@ def laplacian_skeletonisation(
         })
         node_offset += len(result[1])
 
-    if alternating:
+    if alternating and alter_init_thinning:
         original_topology = foreground_topology(volume_data)[:2]
         if foreground_topology(nifti_skel)[:2] != original_topology:
             raise RuntimeError(
@@ -265,6 +270,18 @@ def laplacian_skeletonisation(
         else f'{os.path.splitext(os.path.splitext(nifti_path)[0])[0]}_skel'
     )
 
+    if dev_contra_graph and not alternating:
+        write_graphml(
+            np.vstack([res[5] for res in results]),
+            sparse.block_diag([res[6] for res in results], format='csr'),
+            component_labels=np.concatenate(
+                [np.full(len(res[5]), res[0], dtype=int) for res in results]
+            ),
+            affine=img.affine,
+            volume_shape=volume_data.shape,
+            output_path=f'{out_path}_intermediate.graphml',
+        )
+
     print(f'\nSaving structural centerline data matrices to: {out_path}')
     if graphml:
         component_labels = np.concatenate(
@@ -277,7 +294,9 @@ def laplacian_skeletonisation(
             affine=img.affine,
             volume_shape=volume_data.shape,
             output_path=f'{out_path}.graphml',
-            binary_segmentation=volume_data,
+            binary_segmentation=(
+                volume_data if alter_init_thinning else None
+            ) if alternating else nifti_skel,
             edge_paths=edge_paths,
         )
     else:

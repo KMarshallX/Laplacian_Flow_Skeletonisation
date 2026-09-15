@@ -19,7 +19,7 @@ from scipy import ndimage, sparse
 from scipy.spatial import cKDTree
 
 from .graph import compute_sparse_adjacency_matrix
-from .medial import compute_medialness, estimate_graph_tangents, transverse_edt_targets
+from .medial import compute_medialness
 from .objects import UnionFind
 
 
@@ -381,108 +381,48 @@ def _path_error(points, start, end):
     )
 
 
-def _smooth_thinned_graph(
-    coordinates,
-    edges,
-    mask,
-    w_L=0.5,
-    w_H_base=0.5,
-    retention_ratio=5.0,
-    medial_boost=1.0,
-    tol=0.05,
-    max_iterations=20,
-):
-    """Smooth fixed edges with EDT guidance and fixed post-thinning anchors.
+def _fit_geometry(coordinates, edges, guidance, mask, medial_boost):
+    """Fit each voxel's interior point between fixed edge contact points.
 
-    Minimize squared normalized-Laplacian, anchor and ridge residuals. The
-    Laplacian and ridge residuals both use w_L; retention uses w_H_base, with
-    retention_ratio applied to endpoints and junctions before squaring. Ridge
-    targets are refreshed from the original voxel-space EDT. No node is pinned
-    or directionally constrained. Invalid geometric steps are backtracked.
+    Each edge gets a fixed midpoint shared by its two source voxel cubes. A
+    fitted point stays inside its own cube, so the two half-edges and their
+    deformation stay inside the foreground even at diagonal-only contacts.
+    Junctions and endpoints stay fixed. For other points the weighted quadratic
+    fit has a closed-form minimum, clipped to the voxel's convex bounds.
     """
-    # Imported here because alternating also uses refinement's graph extraction.
-    from .alternating import _valid_graph_update
-
-    for name, value, minimum in (
-        ('w_L', w_L, 0.0),
-        ('w_H_base', w_H_base, 0.0),
-        ('retention_ratio', retention_ratio, 1.0),
-        ('medial_boost', medial_boost, 1.0),
-        ('tol', tol, 0.0),
-    ):
-        if not np.isfinite(value) or value < minimum:
-            raise ValueError(f'{name} must be finite and >= {minimum}.')
-    if w_H_base == 0:
-        raise ValueError('w_H_base must be positive for post-thinning retention.')
-    mask = np.asarray(mask, dtype=bool)
-    anchors = np.asarray(coordinates, dtype=float).copy()
-    if not len(edges) or w_L == 0:
-        return anchors, edges
-    rows, cols = np.asarray(edges, dtype=int).T
-    adjacency = sparse.csr_matrix(
-        (np.ones(2 * len(edges)), (np.r_[rows, cols], np.r_[cols, rows])),
-        shape=(len(anchors), len(anchors)),
-    )
-    degree = np.asarray(adjacency.sum(axis=1)).ravel()
-    laplacian = sparse.diags((degree > 0).astype(float)) - sparse.diags(
-        1.0 / np.maximum(degree, 1)
-    ) @ adjacency
+    if not len(edges):
+        return coordinates, edges
+    degree = np.bincount(edges.ravel(), minlength=len(coordinates))
+    contacts = coordinates[edges].mean(axis=1)
+    sums = np.zeros_like(coordinates)
+    np.add.at(sums, edges[:, 0], contacts)
+    np.add.at(sums, edges[:, 1], contacts)
+    nearest = cKDTree(guidance).query(coordinates)[1]
+    targets = np.clip(guidance[nearest], coordinates - 0.49, coordinates + 0.49)
     edt = ndimage.distance_transform_edt(np.pad(mask, 1))[1:-1, 1:-1, 1:-1]
-    nearest = ndimage.distance_transform_edt(~mask, return_indices=True)[1]
-    retention = w_H_base * np.where(degree == 2, 1.0, retention_ratio)
-    retention *= medial_boost ** compute_medialness(edt, anchors)
-    weights = retention ** 2
-    ridge_weight = w_L ** 2 * (degree > 0)
-    system = w_L ** 2 * (laplacian.T @ laplacian) + sparse.diags(
-        weights + ridge_weight
-    )
-    solve = sparse.linalg.factorized(system.tocsc())
-    current = anchors.copy()
-    stable_steps = 0
-    for _ in range(max_iterations):
-        radii = ndimage.map_coordinates(edt, current.T, order=1, mode='nearest')
-        tangents = estimate_graph_tangents(
-            current, adjacency, window=max(2.0, float(np.median(radii)))
+    reference_radius = ndimage.map_coordinates(edt, coordinates.T, order=1)
+    target_radius = ndimage.map_coordinates(edt, targets.T, order=1)
+    # An unconverged dense flow can drift towards a wall. Do not give that
+    # displacement extra retention at a better-centred reference voxel.
+    targets[target_radius < reference_radius] = coordinates[
+        target_radius < reference_radius
+    ]
+    weights = medial_boost ** (2 * compute_medialness(edt, coordinates))
+    fitted = (weights[:, None] * targets + sums) / (weights + degree)[:, None]
+    fitted = np.clip(fitted, coordinates - 0.49, coordinates + 0.49)
+    fitted[degree != 2] = coordinates[degree != 2]
+    portals = np.arange(len(edges)) + len(coordinates)
+    split_edges = np.vstack(
+        (
+            np.column_stack((edges[:, 0], portals)),
+            np.column_stack((portals, edges[:, 1])),
         )
-        ridge = transverse_edt_targets(edt, mask, current, tangents)
-        # Solve for displacement to avoid dependence on the coordinate origin.
-        residual = weights[:, None] * (anchors - current)
-        residual += ridge_weight[:, None] * (ridge - current)
-        residual -= w_L ** 2 * laplacian.T.dot(laplacian.dot(current))
-        proposal = current + solve(residual)
-        if not np.all(np.isfinite(proposal)):
-            raise RuntimeError('Post-thinning smoothing produced non-finite positions.')
-        positions = np.rint(proposal).astype(np.intp)
-        bounds = np.asarray(mask.shape)
-        outside = np.any((positions < 0) | (positions >= bounds), axis=1)
-        lookup = np.clip(positions, 0, bounds - 1)
-        outside |= ~mask[tuple(lookup.T)]
-        proposal[outside] = nearest[(slice(None), *lookup[outside].T)].T
-        accepted = None
-        for fraction in (1.0, 0.5, 0.25, 0.125):
-            trial = current + fraction * (proposal - current)
-            lengths = np.linalg.norm(trial[rows] - trial[cols], axis=1)
-            if np.all(lengths > 1e-8) and _valid_graph_update(
-                current, trial, edges, mask, np.ones(3)
-            ):
-                accepted = trial
-                break
-        if accepted is None:
-            print(
-                'Post-thinning smoothing stopped: '
-                'geometric constraints blocked the step.'
-            )
-            break
-        movement = np.max(np.linalg.norm(accepted - current, axis=1))
-        current = accepted
-        stable_steps = stable_steps + 1 if movement < tol else 0
-        if stable_steps >= 3:
-            break
-    return current, edges
+    )
+    return np.vstack((fitted, contacts)), split_edges
 
 
 def _simplify_paths(coordinates, edges, mask, tolerance):
-    """Remove degree-two vertices only, retaining all original path error samples."""
+    """Remove degree-two vertices; mask=None skips foreground shortcut checks."""
     neighbours = [set() for _ in coordinates]
     paths = {}
     for u, v in edges:
@@ -509,7 +449,7 @@ def _simplify_paths(coordinates, edges, mask, tolerance):
         samples = np.vstack((incoming, outgoing[1:]))
         if _path_error(
             samples, coordinates[u], coordinates[v]
-        ) > tolerance or not _filled_box(samples, mask):
+        ) > tolerance or (mask is not None and not _filled_box(samples, mask)):
             continue
         neighbours[u].remove(vertex)
         neighbours[v].remove(vertex)
@@ -537,10 +477,6 @@ def refine_graph(
     merge_tolerance=0.25,
     w_H_medial=1.0,
     return_paths=False,
-    w_L=0.5,
-    w_H_base=0.5,
-    retention_ratio=5.0,
-    tol=0.05,
 ):
     """Extract a graph with every foreground tunnel and simplify its geometry.
 
@@ -555,16 +491,9 @@ def refine_graph(
         Maximum polyline deviation in voxel units during degree-two merging.
         Zero retains the reference sampling. No value permits tunnel removal.
     w_H_medial : float, optional
-        Medialness-based retention boost for the bounded final fit. Default is 1.
+        Retention boost for the bounded final geometric fit. Default is 1.
     return_paths : bool, optional
         Also return reference voxels and the retained edge polylines for export.
-    w_L, w_H_base : float, optional
-        Post-thinning smoothing and fixed-anchor retention weights. Default 0.5.
-        Retention must be positive; zero w_L disables smoothing.
-    retention_ratio : float, optional
-        Endpoint/junction retention multiplier, >= 1. Default 5; squared in the fit.
-    tol : float, optional
-        Smoothing displacement tolerance in voxels for three stable steps.
 
     Returns
     -------
@@ -604,9 +533,7 @@ def refine_graph(
     coordinates = _thin_foreground(mask, guidance).astype(float)
     reference_voxels = coordinates.astype(int)
     edges, tunnels = _tunnel_graph(coordinates)
-    coordinates, edges = _smooth_thinned_graph(
-        coordinates, edges, mask, w_L, w_H_base, retention_ratio, w_H_medial, tol
-    )
+    coordinates, edges = _fit_geometry(coordinates, edges, guidance, mask, w_H_medial)
     coordinates, edges, paths = _simplify_paths(
         coordinates, edges, mask, merge_tolerance
     )
