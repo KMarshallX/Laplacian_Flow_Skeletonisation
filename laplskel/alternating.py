@@ -372,37 +372,41 @@ def fit_branch_complex(
     spacing,
     merge_tolerance,
     max_iterations=20,
+    preserve_reference=True,
 ):
-    """Jointly centre and smooth branches while retaining the discrete complex."""
+    """Fit branches, optionally enforcing reference and foreground constraints."""
     coordinates, edges = _resample_edges(skeleton_voxels, skeleton_edges, spacing)
-    try:
-        for point in coordinates:
-            _foreground_voxel(point, original_mask.shape, original_mask)
-        for u, v in edges:
-            _edge_voxels(
-                coordinates[u], coordinates[v], original_mask.shape, original_mask
-            )
-    except ValueError as error:
-        raise RuntimeError(
-            'No contained initial graph geometry is available.'
-        ) from error
-    if _nonincident_intersections(coordinates, edges, spacing):
-        raise RuntimeError('Initial graph geometry contains an unintended crossing.')
+    if preserve_reference:
+        try:
+            for point in coordinates:
+                _foreground_voxel(point, original_mask.shape, original_mask)
+            for u, v in edges:
+                _edge_voxels(
+                    coordinates[u], coordinates[v], original_mask.shape, original_mask
+                )
+        except ValueError as error:
+            raise RuntimeError(
+                'No contained initial graph geometry is available.'
+            ) from error
+        if _nonincident_intersections(coordinates, edges, spacing):
+            raise RuntimeError('Initial graph geometry contains an unintended crossing.')
     adjacency = _adjacency_from_edges(len(coordinates), edges)
     degree = adjacency.getnnz(axis=1)
-    reference = np.asarray(reference_voxels, dtype=float)
-    reference_edges = np.asarray(reference_edges, dtype=int).reshape(-1, 2)
-    mapping = _match_critical_nodes(
-        reference, reference_edges, coordinates, edges, spacing
-    )
-    if mapping is None:
-        raise RuntimeError(
-            'Final skeleton no longer matches the reference branch complex.'
+    mapping = {}
+    if preserve_reference:
+        reference = np.asarray(reference_voxels, dtype=float)
+        reference_edges = np.asarray(reference_edges, dtype=int).reshape(-1, 2)
+        mapping = _match_critical_nodes(
+            reference, reference_edges, coordinates, edges, spacing
         )
-    anchors = coordinates.copy()
-    critical_degree, _, critical_radii, critical_lengths = _critical_branch_data(
-        np.asarray(skeleton_voxels, dtype=float), skeleton_edges, original_edt, spacing
-    )
+        if mapping is None:
+            raise RuntimeError(
+                'Final skeleton no longer matches the reference branch complex.'
+            )
+        anchors = coordinates.copy()
+        critical_degree, _, critical_radii, critical_lengths = _critical_branch_data(
+            np.asarray(skeleton_voxels, dtype=float), skeleton_edges, original_edt, spacing
+        )
     stable = False
     rejected_updates = 0
     for _ in range(max_iterations):
@@ -412,12 +416,17 @@ def fit_branch_complex(
         window = max(2.0 * float(np.min(spacing)), float(np.median(local_radii)))
         tangents = estimate_graph_tangents(coordinates, adjacency, spacing, window)
         ridge = transverse_edt_targets(
-            original_edt, original_mask, coordinates, tangents, spacing
+            original_edt, original_mask, coordinates, tangents, spacing,
+            enforce_containment=preserve_reference,
         )
         ridge = _junction_targets(coordinates, adjacency, ridge, tangents, spacing)
         neighbour_sum = adjacency.astype(float).dot(coordinates)
         neighbour_mean = neighbour_sum / np.maximum(degree[:, None], 1)
+        if not preserve_reference:
+            neighbour_mean[degree == 0] = coordinates[degree == 0]
         proposal = 0.4 * ridge + 0.6 * neighbour_mean
+        if not np.all(np.isfinite(proposal)):
+            raise RuntimeError('Graph fitting produced non-finite coordinates.')
 
         # Retain the longitudinal endpoint/branch cap while allowing transverse
         # displacement to the centre of an even-width EDT plateau.
@@ -441,7 +450,9 @@ def fit_branch_complex(
         accepted_trial = False
         for fraction in (1.0, 0.5, 0.25, 0.125):
             trial = coordinates + fraction * (proposal - coordinates)
-            if _valid_graph_update(coordinates, trial, edges, original_mask, spacing):
+            if not preserve_reference or _valid_graph_update(
+                coordinates, trial, edges, original_mask, spacing
+            ):
                 accepted = trial
                 accepted_trial = True
                 break
@@ -463,7 +474,8 @@ def fit_branch_complex(
         coordinates, adjacency, spacing, direction_window
     )
     ridge = transverse_edt_targets(
-        original_edt, original_mask, coordinates, tangents, spacing
+        original_edt, original_mask, coordinates, tangents, spacing,
+        enforce_containment=preserve_reference,
     )
     ridge = _junction_targets(coordinates, adjacency, ridge, tangents, spacing)
     ridge_distance = np.linalg.norm((coordinates - ridge) * spacing, axis=1)
@@ -478,16 +490,18 @@ def fit_branch_complex(
         'max_ridge_distance': float(np.max(ridge_distance)),
     }
     coordinates, simplified_edges, paths = _simplify_paths(
-        coordinates, edges, original_mask, merge_tolerance
+        coordinates, edges,
+        original_mask if preserve_reference else None, merge_tolerance
     )
-    fitted_signature = branch_complex_signature(coordinates, simplified_edges)
-    if fitted_signature != branch_complex_signature(reference, reference_edges):
-        raise RuntimeError('Graph fitting changed the reference branch complex.')
-    for point in coordinates:
-        _foreground_voxel(point, original_mask.shape, original_mask)
-    for path in paths.values():
-        for start, end in zip(path[:-1], path[1:]):
-            _edge_voxels(start, end, original_mask.shape, original_mask)
+    if preserve_reference:
+        fitted_signature = branch_complex_signature(coordinates, simplified_edges)
+        if fitted_signature != branch_complex_signature(reference, reference_edges):
+            raise RuntimeError('Graph fitting changed the reference branch complex.')
+        for point in coordinates:
+            _foreground_voxel(point, original_mask.shape, original_mask)
+        for path in paths.values():
+            for start, end in zip(path[:-1], path[1:]):
+                _edge_voxels(start, end, original_mask.shape, original_mask)
     return (
         coordinates,
         _adjacency_from_edges(len(coordinates), simplified_edges),
@@ -509,12 +523,15 @@ def alternating_graph_skeletonisation(
     local_pca_hops=1,
     solver='CG',
     merge_tolerance=0.25,
+    alter_init_thinning=False,
 ):
     """Alternate bounded contraction and one-layer topology-safe thinning.
 
-    The original foreground and physical EDT stay fixed. The preliminary branch
-    complex is authoritative: a sweep that changes any terminal/junction attachment
-    signature or independent cycle is rolled back.
+    The original foreground and physical EDT stay fixed. Local thinning uses
+    the default simple-voxel and tip-protection rules. With alter_init_thinning,
+    an initial branch reference additionally constrains thinning and fitting,
+    and hard containment is enabled. Without it, geometry is unconstrained and
+    candidate skeletons use the current contraction/EDT guidance.
     """
     foreground = np.asarray(mask, dtype=bool)
     spacing = np.asarray(spacing, dtype=float)
@@ -524,7 +541,7 @@ def alternating_graph_skeletonisation(
         raise ValueError('contraction_steps and max_cycles must be positive.')
     if spacing.shape != (3,) or np.any(spacing <= 0) or np.any(~np.isfinite(spacing)):
         raise ValueError('spacing must contain three positive finite values.')
-    if foreground_topology(foreground)[2]:
+    if alter_init_thinning and foreground_topology(foreground)[2]:
         raise ValueError(
             'Foreground contains enclosed cavities; a curve graph cannot preserve them.'
         )
@@ -532,17 +549,20 @@ def alternating_graph_skeletonisation(
     original_edt = ndimage.distance_transform_edt(
         np.pad(foreground, 1), sampling=spacing
     )[1:-1, 1:-1, 1:-1]
-    anchors = _terminal_anchors(foreground, original_edt, spacing)
-    initial = np.argwhere(foreground).astype(float)
-    topology_guidance = initial.copy()
-    reference_voxels, reference_edges, reference_signature = _skeleton_state(
-        foreground, topology_guidance, anchors
-    )
-    reference_mask = np.zeros_like(foreground)
-    reference_mask[tuple(reference_voxels.T)] = True
-    original_topology = foreground_topology(foreground)[:2]
-    if foreground_topology(reference_mask)[:2] != original_topology:
-        raise RuntimeError('Reference digital skeleton changed foreground topology.')
+    anchors = reference_voxels = reference_edges = reference_signature = None
+    topology_guidance = None
+    if alter_init_thinning:
+        anchors = _terminal_anchors(foreground, original_edt, spacing)
+        initial = np.argwhere(foreground).astype(float)
+        topology_guidance = initial.copy()
+        reference_voxels, reference_edges, reference_signature = _skeleton_state(
+            foreground, topology_guidance, anchors
+        )
+        reference_mask = np.zeros_like(foreground)
+        reference_mask[tuple(reference_voxels.T)] = True
+        original_topology = foreground_topology(foreground)[:2]
+        if foreground_topology(reference_mask)[:2] != original_topology:
+            raise RuntimeError('Reference digital skeleton changed foreground topology.')
     working = foreground.copy()
     previous_voxels = None
     previous_guide = None
@@ -567,7 +587,7 @@ def alternating_graph_skeletonisation(
             binary_segmentation=foreground,
             use_edt=False,
             use_anisotropic=use_anisotropic,
-            enforce_containment=True,
+            enforce_containment=alter_init_thinning,
             w_L=w_L,
             w_H_base=w_H_base,
             w_H_medial=w_H_medial,
@@ -587,7 +607,8 @@ def alternating_graph_skeletonisation(
             contracted, adjacency, spacing, direction_window
         )
         ridge_targets = transverse_edt_targets(
-            original_edt, foreground, contracted, tangents, spacing
+            original_edt, foreground, contracted, tangents, spacing,
+            enforce_containment=alter_init_thinning,
         )
         guide = 0.5 * contracted + 0.5 * ridge_targets
         def preserves_reference(candidate):
@@ -601,20 +622,25 @@ def alternating_graph_skeletonisation(
             guide,
             original_edt,
             spacing,
-            validator=preserves_reference,
+            validator=preserves_reference if alter_init_thinning else None,
             protected=anchors,
         )
-        proposed_voxels, proposed_edges, proposed_signature = _skeleton_state(
-            proposed, topology_guidance, anchors
-        )
-        if proposed_signature != reference_signature:
-            raise RuntimeError('A validated thinning sweep changed the branch complex.')
-        candidate_mask = np.zeros_like(foreground)
-        candidate_mask[tuple(proposed_voxels.T)] = True
-        if foreground_topology(candidate_mask)[:2] != original_topology:
-            raise RuntimeError(
-                'Candidate digital skeleton changed foreground topology.'
+        if alter_init_thinning:
+            proposed_voxels, proposed_edges, proposed_signature = _skeleton_state(
+                proposed, topology_guidance, anchors
             )
+        else:
+            proposed_voxels = _thin_foreground(proposed, guide).astype(int)
+            proposed_edges, _ = _tunnel_graph(proposed_voxels)
+        if alter_init_thinning and proposed_signature != reference_signature:
+            raise RuntimeError('A validated thinning sweep changed the branch complex.')
+        if alter_init_thinning:
+            candidate_mask = np.zeros_like(foreground)
+            candidate_mask[tuple(proposed_voxels.T)] = True
+            if foreground_topology(candidate_mask)[:2] != original_topology:
+                raise RuntimeError(
+                    'Candidate digital skeleton changed foreground topology.'
+                )
         last_skeleton_voxels = proposed_voxels
         last_skeleton_edges = proposed_edges
         if deleted == 0:
@@ -641,7 +667,7 @@ def alternating_graph_skeletonisation(
     else:
         warnings.warn(
             'Alternating skeletonisation reached its cycle budget; returning the '
-            'last structure-preserving state.',
+            'last digital skeleton.',
             RuntimeWarning,
             stacklevel=2,
         )
@@ -650,11 +676,12 @@ def alternating_graph_skeletonisation(
         previous_guide = np.argwhere(working).astype(float)
     skeleton_voxels = last_skeleton_voxels
     skeleton_edges = last_skeleton_edges
-    final_signature = branch_complex_signature(skeleton_voxels, skeleton_edges)
-    if final_signature != reference_signature:
-        raise RuntimeError(
-            'Alternating skeletonisation changed the reference branch complex.'
-        )
+    if alter_init_thinning:
+        final_signature = branch_complex_signature(skeleton_voxels, skeleton_edges)
+        if final_signature != reference_signature:
+            raise RuntimeError(
+                'Alternating skeletonisation changed the reference branch complex.'
+            )
     coordinates, adjacency, paths, diagnostics = fit_branch_complex(
         reference_voxels,
         reference_edges,
@@ -664,11 +691,13 @@ def alternating_graph_skeletonisation(
         original_edt,
         spacing,
         merge_tolerance,
+        preserve_reference=alter_init_thinning,
     )
-    output_mask = np.zeros_like(foreground)
-    output_mask[tuple(skeleton_voxels.T)] = True
-    if foreground_topology(output_mask)[:2] != original_topology:
-        raise RuntimeError('Digital skeleton changed foreground components or tunnels.')
+    if alter_init_thinning:
+        output_mask = np.zeros_like(foreground)
+        output_mask[tuple(skeleton_voxels.T)] = True
+        if foreground_topology(output_mask)[:2] != original_topology:
+            raise RuntimeError('Digital skeleton changed foreground components or tunnels.')
     output_voxels = skeleton_voxels
     geometry_outcome = (
         'validated-fallback' if diagnostics['fallback']

@@ -71,6 +71,15 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        '--alter_init_thinning',
+        action='store_true',
+        help=(
+            'With --alternating, build an initial branch reference and enable '
+            'reference preservation, critical-node movement caps and containment. '
+            'Without this flag, use default thinning rules and free graph fitting.'
+        ),
+    )
+    optional.add_argument(
         '--contraction_steps',
         type=_positive_integer,
         default=5,
@@ -123,15 +132,6 @@ def _get_parser():
         type=float,
         default=0.5,
         help='Baseline structural anchor retention weight variable.',
-    )
-    optional.add_argument(
-        '--retention_ratio',
-        type=float,
-        default=5.0,
-        help=(
-            'Post-thinning endpoint/junction retention multiplier relative to --w_H. '
-            'Must be >=1; squared in the fit. Default workflow only [Default=5].'
-        ),
     )
     optional.add_argument(
         '--w_H_medial',

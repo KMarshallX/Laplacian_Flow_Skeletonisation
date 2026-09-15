@@ -34,7 +34,7 @@ def _process_single_label(
     alternating=False,
     voxel_spacing=(1.0, 1.0, 1.0),
     contraction_steps=5,
-    retention_ratio=5.0,
+    alter_init_thinning=False,
 ):
     """
     Worker function to process a single connected component label.
@@ -94,9 +94,9 @@ def _process_single_label(
         Physical voxel spacing used by EDT and geometric-distance calculations.
     contraction_steps : int, optional
         Maximum contraction iterations per alternating cycle. Default is 5.
-    retention_ratio : float, optional
-        Post-thinning endpoint/junction retention multiplier relative to w_H_base.
-        Default 5; used by the default workflow.
+    alter_init_thinning : bool, optional
+        Enable initial branch references and constrained alternating geometry.
+        Default False; ignored by the default workflow.
 
     Returns
     -------
@@ -113,10 +113,9 @@ def _process_single_label(
     """
     X_init_local = np.argwhere(cropped_label).astype(np.uint16)
     # Skip small noise components
-    if len(X_init_local) <= 3 and not alternating:
+    if len(X_init_local) <= 3 and (not alternating or alter_init_thinning):
         refined, adj_sparse, voxels, paths = refine_graph(
-            cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True,
-            w_L=w_L, w_H_base=w_H_base, retention_ratio=retention_ratio, tol=tol,
+            cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True
         )
         X_init_global = refined + np.array(offset_origin, dtype=np.float32)
         return (
@@ -133,6 +132,7 @@ def _process_single_label(
             cropped_label,
             spacing=voxel_spacing,
             contraction_steps=contraction_steps,
+            alter_init_thinning=alter_init_thinning,
             use_anisotropic=use_anisotropic,
             w_L=w_L,
             w_H_base=w_H_base,
@@ -167,8 +167,7 @@ def _process_single_label(
         )
 
         label_X_local, label_adj, voxels, paths = refine_graph(
-            cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True,
-            w_L=w_L, w_H_base=w_H_base, retention_ratio=retention_ratio, tol=tol,
+            cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True
         )
     label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
 
@@ -207,7 +206,7 @@ def process_components(
     alternating=False,
     voxel_spacing=(1.0, 1.0, 1.0),
     contraction_steps=5,
-    retention_ratio=5.0,
+    alter_init_thinning=False,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -257,7 +256,7 @@ def process_components(
                 alternating,
                 voxel_spacing,
                 contraction_steps,
-                retention_ratio,
+                alter_init_thinning,
             )
         )
 
