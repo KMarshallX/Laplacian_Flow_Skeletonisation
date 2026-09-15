@@ -43,6 +43,7 @@ def laplacian_skeletonisation(
     alternating=False,
     contraction_steps=5,
     alter_init_thinning=False,
+    dev_contra_graph=False,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -132,6 +133,11 @@ def laplacian_skeletonisation(
         Without it, thinning retains local topology and tip protection, while
         fitted geometry is unconstrained. Ignored by the default workflow.
 
+    dev_contra_graph : bool, optional
+        Also export the contracted graph before thinning as
+        <output_stem>_intermediate.graphml beside the normal outputs.
+        Ignored in alternating mode.
+
     Returns
     -------
     contracted_X : numpy.ndarray
@@ -195,6 +201,7 @@ def laplacian_skeletonisation(
         img.header.get_zooms()[:3],
         contraction_steps,
         alter_init_thinning,
+        dev_contra_graph,
     )
 
     print('Reuniting results from parallel jobs.')
@@ -262,6 +269,18 @@ def laplacian_skeletonisation(
         if out_path
         else f'{os.path.splitext(os.path.splitext(nifti_path)[0])[0]}_skel'
     )
+
+    if dev_contra_graph and not alternating:
+        write_graphml(
+            np.vstack([res[5] for res in results]),
+            sparse.block_diag([res[6] for res in results], format='csr'),
+            component_labels=np.concatenate(
+                [np.full(len(res[5]), res[0], dtype=int) for res in results]
+            ),
+            affine=img.affine,
+            volume_shape=volume_data.shape,
+            output_path=f'{out_path}_intermediate.graphml',
+        )
 
     print(f'\nSaving structural centerline data matrices to: {out_path}')
     if graphml:

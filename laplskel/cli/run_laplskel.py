@@ -63,6 +63,14 @@ def _get_parser():
         ),
     )
     optional.add_argument(
+        '--dev_contra_graph',
+        action='store_true',
+        help=(
+            'Also write the contracted graph before thinning as '
+            '<output_stem>_intermediate.graphml. Ignored with --alternating.'
+        ),
+    )
+    optional.add_argument(
         '--alternating',
         action='store_true',
         help=(
