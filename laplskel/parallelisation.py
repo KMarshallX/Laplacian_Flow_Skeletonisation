@@ -36,6 +36,7 @@ def _process_single_label(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    dev_elongation_ratio=25.0,
 ):
     """
     Worker function to process a single connected component label.
@@ -100,6 +101,9 @@ def _process_single_label(
         Default False; ignored by the default workflow.
     dev_contra_graph : bool, optional
         Append pre-refinement coordinates and adjacency in the default workflow.
+    dev_elongation_ratio : float, optional
+        PCA eigenvalue ratio used to classify compact and elongated triangles in
+        the default workflow. Default is 25.
 
     Returns
     -------
@@ -177,6 +181,9 @@ def _process_single_label(
             decimate_every=decimate_every,
             min_edge_length=min_edge_length,
             solver=solver,
+            decimation_mode='triangle',
+            voxel_spacing=voxel_spacing,
+            dev_elongation_ratio=dev_elongation_ratio,
         )
 
         if dev_contra_graph:
@@ -227,6 +234,7 @@ def process_components(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    dev_elongation_ratio=25.0,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -278,6 +286,7 @@ def process_components(
                 contraction_steps,
                 alter_init_thinning,
                 dev_contra_graph,
+                dev_elongation_ratio,
             )
         )
 

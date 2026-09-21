@@ -163,8 +163,8 @@ def _get_parser():
         '--decimate_every',
         dest='decimate_every',
         type=int,
-        default=1,
-        help='Decimate nodes every N steps [Default=1].',
+        default=200,
+        help='Run default-workflow triangle decimation every N steps [Default=200].',
     )
     optional.add_argument(
         '--dec_grid_size',
@@ -172,8 +172,19 @@ def _get_parser():
         type=float,
         default=0.01,
         help=(
-            'Maximum intermediate merge-cluster diameter in voxel units. '
-            'Final branch simplification uses --merge_tolerance.'
+            'Legacy edge-decimation threshold retained for compatibility; it does '
+            'not affect default-workflow triangle decimation.'
+        ),
+    )
+    optional.add_argument(
+        '--dev-elongation-ratio',
+        '--dev_elongation_ratio',
+        dest='dev_elongation_ratio',
+        type=float,
+        default=25.0,
+        help=(
+            'Developmental PCA eigenvalue ratio above which eligible triangles '
+            'are flattened into chains [Default=25].'
         ),
     )
     optional.add_argument(

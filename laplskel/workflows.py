@@ -28,7 +28,7 @@ def laplacian_skeletonisation(
     w_H_base=0.5,
     w_H_medial=1.0,
     tol=0.05,
-    decimate_every=1,
+    decimate_every=200,
     min_edge_length=0.01,
     downsample=False,
     seed=42,
@@ -44,6 +44,7 @@ def laplacian_skeletonisation(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    dev_elongation_ratio=25.0,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -84,11 +85,10 @@ def laplacian_skeletonisation(
         consecutive steps without structural changes. Default is 0.05.
     decimate_every : int, optional
         Frequency cadence interval defining how many contraction loop steps occur before
-        triggering an edge-collapse decimation execution. Default is 1.
+        triggering triangle decimation in the default workflow. Default is 200.
     min_edge_length : float, optional
-        The Euclidean spatial threshold criteria below which two connected nodes undergo
-        structural merging, expressed as a fraction of the isotropic voxel length.
-        Default is 0.01.
+        Retained for compatibility and legacy direct contraction calls. It does not
+        affect default-workflow triangle decimation. Default is 0.01.
     downsample : bool, optional
         Retained for API compatibility. True is rejected because random
         downsampling cannot preserve every foreground tunnel. Default is False.
@@ -137,6 +137,9 @@ def laplacian_skeletonisation(
         Also export the contracted graph before thinning as
         <output_stem>_intermediate.graphml beside the normal outputs.
         Ignored in alternating mode.
+    dev_elongation_ratio : float, optional
+        Developmental PCA eigenvalue ratio above which an eligible triangle is
+        flattened into a chain. Must be finite and greater than 1. Default is 25.
 
     Returns
     -------
@@ -154,6 +157,8 @@ def laplacian_skeletonisation(
     """
     if not np.isfinite(merge_tolerance) or merge_tolerance < 0:
         raise ValueError('merge_tolerance must be finite and >= 0.')
+    if not np.isfinite(dev_elongation_ratio) or dev_elongation_ratio <= 1.0:
+        raise ValueError('dev_elongation_ratio must be finite and greater than 1.')
     if alternating and (
         not isinstance(contraction_steps, int) or contraction_steps < 1
     ):
@@ -202,6 +207,7 @@ def laplacian_skeletonisation(
         contraction_steps,
         alter_init_thinning,
         dev_contra_graph,
+        dev_elongation_ratio,
     )
 
     print('Reuniting results from parallel jobs.')

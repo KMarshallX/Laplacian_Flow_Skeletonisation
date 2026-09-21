@@ -28,14 +28,14 @@ Start with `laplskel/cli/run_laplskel.py` for CLI options and `laplskel/workflow
 for input loading, component processing, and output assembly. Algorithm modules
 live in `laplskel/`:
 
-| Work area               | Main files                                  | Responsibility                                                                                                                                     |
-| ----------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Thinning and refinement | `refinement.py`                           | Topology-preserving voxel deletion, graph extraction, smoothing, and path simplification.                                                          |
-| Contraction             | `contraction.py`                          | Laplacian contraction, linear solvers, convergence, and edge collapse.                                                                             |
-| Runtime efficiency      | `parallelisation.py`                      | Component cropping, worker scheduling, and per-component algorithm dispatch. Solver and thinning optimizations also touch their algorithm modules. |
-| Alternating algorithm   | `alternating.py`                          | Experimental contraction/thinning loop and branch fitting; integrates both algorithm areas.                                                        |
-| Shared foundations      | `graph.py`, `medial.py`, `objects.py` | Sparse adjacency/Laplacians, medial guidance, and union-find.                                                                                      |
-| Data utilities          | `utils.py`                                | Component labeling, voxel reconstruction, and GraphML export.                                                                                      |
+| Work area               | Main files                                     | Responsibility                                                                                                                                     |
+| ----------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Thinning and refinement | `refinement.py`                              | Topology-preserving voxel deletion, graph extraction, smoothing, and path simplification.                                                          |
+| Contraction             | `contraction.py`, `triangle_decimation.py` | Laplacian contraction, linear solvers, convergence, legacy edge collapse, and default-workflow flux-guided triangle decimation.                    |
+| Runtime efficiency      | `parallelisation.py`                         | Component cropping, worker scheduling, and per-component algorithm dispatch. Solver and thinning optimizations also touch their algorithm modules. |
+| Alternating algorithm   | `alternating.py`                             | Experimental contraction/thinning loop and branch fitting; integrates both algorithm areas.                                                        |
+| Shared foundations      | `graph.py`, `medial.py`, `objects.py`    | Sparse adjacency/Laplacians, medial guidance, and union-find.                                                                                      |
+| Data utilities          | `utils.py`                                   | Component labeling, voxel reconstruction, and GraphML export.                                                                                      |
 
 Thinning and contraction can be developed separately within their modules.
 Coordinate changes to shared helpers, `alternating.py`, and parameter forwarding

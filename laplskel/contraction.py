@@ -9,6 +9,7 @@ from scipy.sparse.linalg import cg, spsolve
 from .graph import compute_laplacian_matrix
 from .medial import compute_medialness
 from .objects import UnionFind
+from .triangle_decimation import DistanceFluxSampler, triangle_collapse_decimation
 
 
 def edge_collapse_decimation(
@@ -155,6 +156,9 @@ def laplacian_graph_contraction(
     local_pca_hops=1,
     solver='CG',
     provisional=False,
+    decimation_mode='edge',
+    voxel_spacing=(1.0, 1.0, 1.0),
+    dev_elongation_ratio=25.0,
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -227,6 +231,14 @@ def laplacian_graph_contraction(
         If True, treat ``max_iter`` as an intentional bounded contraction stage and
         do not warn when that stage ends before geometric convergence. Default is
         False. This does not change the numerical update or convergence test.
+    decimation_mode : {'edge', 'triangle'}, optional
+        Intermediate simplification method. The legacy edge mode remains the default
+        for direct callers and the alternating workflow. Default is 'edge'.
+    voxel_spacing : tuple of float, optional
+        Physical voxel spacing used by triangle geometry and flux calculations.
+    dev_elongation_ratio : float, optional
+        PCA eigenvalue ratio above which triangle mode flattens a triangle into a
+        chain rather than collapsing it. Default is 25.
 
     Returns
     -------
@@ -246,6 +258,23 @@ def laplacian_graph_contraction(
         raise ValueError('solver must be CG, AMGCG, or LU.')
     if max_iter < 1 or decimate_every < 1:
         raise ValueError('max_iter and decimate_every must be positive.')
+    if decimation_mode not in ('edge', 'triangle'):
+        raise ValueError("decimation_mode must be 'edge' or 'triangle'.")
+    voxel_spacing = np.asarray(voxel_spacing, dtype=float)
+    if (
+        voxel_spacing.shape != (3,)
+        or np.any(voxel_spacing <= 0)
+        or np.any(~np.isfinite(voxel_spacing))
+    ):
+        raise ValueError('voxel_spacing must contain three positive finite values.')
+    if not np.isfinite(dev_elongation_ratio) or dev_elongation_ratio <= 1.0:
+        raise ValueError('dev_elongation_ratio must be finite and greater than 1.')
+    if decimation_mode == 'triangle' and (
+        binary_segmentation is None
+        or np.asarray(binary_segmentation).ndim != 3
+        or not np.any(binary_segmentation)
+    ):
+        raise ValueError('triangle decimation requires a nonempty 3D segmentation.')
 
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
@@ -254,6 +283,7 @@ def laplacian_graph_contraction(
     edt_volume = None
     closest_vessels_indices = None
     medialness = None
+    flux_sampler = None
 
     needs_edt = use_edt or enforce_containment or w_H_medial > 1.0
 
@@ -284,17 +314,22 @@ def laplacian_graph_contraction(
         f'Starting contraction with {X.shape[0]} nodes \n\n'
         f'Params:\n'
         f' - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},\n'
-        f' -{edt_string} min_edge_length (collapse threshold)={min_edge_length}\n\n'
+        f' -{edt_string} min_edge_length (legacy edge threshold)={min_edge_length}\n\n'
         f'Options:\n'
         f' - Anisotropic={use_anisotropic}\n'
         f' - EDT={use_edt}\n'
         f' - Medial Boost={w_H_medial if medialness is not None else False}\n'
         f' - Hard Containment={enforce_containment}\n'
+        f' - Decimation mode={decimation_mode}\n'
         f' - Decimation step={decimate_every}\n'
     )
 
     stable_steps = 0
-    for i in range(max_iter):
+    converged = False
+    final_triangle_collapse = False
+    for i in range(max_iter + 1):
+        if i == max_iter and not final_triangle_collapse:
+            break
         n_vertices = X.shape[0]
 
         # 1. Compute chosen Laplacian variant
@@ -472,21 +507,52 @@ def laplacian_graph_contraction(
         max_displacement = np.max(movements)
         X = X_next
 
+        iteration_label = f'{i + 1}/{max_iter}'
+        if i == max_iter:
+            iteration_label += ' (post-collapse update)'
         print(
-            f'Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - '
+            f'Iter {iteration_label} - Remaining Nodes: {X.shape[0]} - '
             f'Mean Drift: {displacement:.5f} - Max Drift: {max_displacement:.5f}{max_pull}'
         )
 
         small_step = max_displacement < tol and step_solved
-        if (i + 1) % decimate_every == 0 or small_step or i + 1 == max_iter:
+        structural_change = False
+        if decimation_mode == 'edge' and (
+            (i + 1) % decimate_every == 0 or small_step or i + 1 == max_iter
+        ):
             X, adj, medialness = edge_collapse_decimation(
                 X, adj, min_edge_length, medialness=medialness, w_H_medial=w_H_medial
             )
-        stable_steps = stable_steps + 1 if small_step and len(X) == n_vertices else 0
+            structural_change = len(X) != n_vertices
+        elif (
+            decimation_mode == 'triangle'
+            and i < max_iter
+            and (i + 1) % decimate_every == 0
+        ):
+            if flux_sampler is None:
+                flux_sampler = DistanceFluxSampler(binary_segmentation, voxel_spacing)
+            X, adj, medialness, structural_change = triangle_collapse_decimation(
+                X,
+                adj,
+                binary_segmentation,
+                voxel_spacing,
+                elongation_ratio=dev_elongation_ratio,
+                medialness=medialness,
+                flux_sampler=flux_sampler,
+            )
+            if i + 1 == max_iter and structural_change:
+                final_triangle_collapse = True
+        if structural_change:
+            stable_steps = 0
+        else:
+            stable_steps = (
+                stable_steps + 1 if small_step and len(X) == n_vertices else 0
+            )
         if stable_steps >= 3:
             print('Contraction geometry stable.')
+            converged = True
             break
-    else:
+    if not converged:
         if provisional:
             return X, adj
         warnings.warn(
