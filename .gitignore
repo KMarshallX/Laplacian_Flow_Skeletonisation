@@ -144,5 +144,8 @@ AGENTS.md
 LOG.md
 alternating_workflow.md
 
+# local dev doc
+WORKFLOW.md
+
 # test instances
 /tests/*
