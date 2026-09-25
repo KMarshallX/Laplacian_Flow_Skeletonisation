@@ -45,6 +45,8 @@ def laplacian_skeletonisation(
     alter_init_thinning=False,
     dev_contra_graph=False,
     dev_elongation_ratio=25.0,
+    dev_edge_thresh=0.05,
+    dev_peri_ratio=1.0,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -84,11 +86,11 @@ def laplacian_skeletonisation(
         Maximum contraction displacement in voxel units, required for three
         consecutive steps without structural changes. Default is 0.05.
     decimate_every : int, optional
-        Frequency cadence interval defining how many contraction loop steps occur before
-        triggering triangle decimation in the default workflow. Default is 200.
+        Contraction updates between three-stage default decimation passes.
+        Default is 200.
     min_edge_length : float, optional
         Retained for compatibility and legacy direct contraction calls. It does not
-        affect default-workflow triangle decimation. Default is 0.01.
+        affect default-workflow graph decimation. Default is 0.01.
     downsample : bool, optional
         Retained for API compatibility. True is rejected because random
         downsampling cannot preserve every foreground tunnel. Default is False.
@@ -138,8 +140,17 @@ def laplacian_skeletonisation(
         <output_stem>_intermediate.graphml beside the normal outputs.
         Ignored in alternating mode.
     dev_elongation_ratio : float, optional
-        Developmental PCA eigenvalue ratio above which an eligible triangle is
-        flattened into a chain. Must be finite and greater than 1. Default is 25.
+        PCA ratio at or above which degree-five neighbourhoods project to
+        chains. Cycle collapse uses a separate fixed PCA cutoff of 25.
+        Default is 25.
+    dev_edge_thresh : float, optional
+        Maximum short-edge group diameter as a fraction of minimum voxel spacing.
+        Default is 0.05; zero disables optional short-edge merging, while
+        edge-connected coincident nodes still merge.
+    dev_peri_ratio : float, optional
+        Multiplier of the smallest voxel-face perimeter used to admit cycles.
+        Admitted cycles also require a PCA ratio below the fixed cutoff of 25.
+        Default is 1.0.
 
     Returns
     -------
@@ -159,6 +170,10 @@ def laplacian_skeletonisation(
         raise ValueError('merge_tolerance must be finite and >= 0.')
     if not np.isfinite(dev_elongation_ratio) or dev_elongation_ratio <= 1.0:
         raise ValueError('dev_elongation_ratio must be finite and greater than 1.')
+    if not alternating and (not np.isfinite(dev_edge_thresh) or dev_edge_thresh < 0):
+        raise ValueError('dev_edge_thresh must be finite and nonnegative.')
+    if not alternating and (not np.isfinite(dev_peri_ratio) or dev_peri_ratio <= 0):
+        raise ValueError('dev_peri_ratio must be finite and positive.')
     if alternating and (
         not isinstance(contraction_steps, int) or contraction_steps < 1
     ):
@@ -208,6 +223,8 @@ def laplacian_skeletonisation(
         alter_init_thinning,
         dev_contra_graph,
         dev_elongation_ratio,
+        dev_edge_thresh,
+        dev_peri_ratio,
     )
 
     print('Reuniting results from parallel jobs.')

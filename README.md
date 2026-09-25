@@ -31,7 +31,7 @@ live in `laplskel/`:
 | Work area               | Main files                                     | Responsibility                                                                                                                                     |
 | ----------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Thinning and refinement | `refinement.py`                              | Topology-preserving voxel deletion, graph extraction, smoothing, and path simplification.                                                          |
-| Contraction             | `contraction.py`, `triangle_decimation.py` | Laplacian contraction, linear solvers, convergence, legacy edge collapse, and default-workflow flux-guided triangle decimation.                    |
+| Contraction             | `contraction.py`, `triangle_decimation.py` | Laplacian contraction, linear solvers, convergence, and default-workflow graph decimation.                                                         |
 | Runtime efficiency      | `parallelisation.py`                         | Component cropping, worker scheduling, and per-component algorithm dispatch. Solver and thinning optimizations also touch their algorithm modules. |
 | Alternating algorithm   | `alternating.py`                             | Experimental contraction/thinning loop and branch fitting; integrates both algorithm areas.                                                        |
 | Shared foundations      | `graph.py`, `medial.py`, `objects.py`    | Sparse adjacency/Laplacians, medial guidance, and union-find.                                                                                      |
@@ -43,3 +43,4 @@ through the CLI, workflow, and component dispatcher. Runtime work spans scheduli
 and algorithm internals, so agree on ownership before editing those internals.
 Preserve coordinate conventions, graph topology, return values, and numerical
 defaults across these boundaries.
+

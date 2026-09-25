@@ -159,6 +159,8 @@ def laplacian_graph_contraction(
     decimation_mode='edge',
     voxel_spacing=(1.0, 1.0, 1.0),
     dev_elongation_ratio=25.0,
+    dev_edge_thresh=0.05,
+    dev_peri_ratio=1.0,
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -207,11 +209,11 @@ def laplacian_graph_contraction(
         Maximum vertex displacement tolerance in voxel units. Three stable steps
         without structural changes are required. Default is 0.05.
     decimate_every : int, optional
-        Frequency cadence interval defining how many contraction loop steps occur before triggering
-        an edge-collapse decimation execution. Default is 1.
+        Contraction updates between scheduled decimation passes. Default is 1
+        for direct callers; the default workflow supplies 200.
     min_edge_length : float, optional
-        The Euclidean spatial threshold criteria below which two connected nodes undergo structural merging.
-        Default is 0.01.
+        Legacy edge-mode merge threshold in voxel units. It does not control
+        short-edge merging in triangle mode. Default is 0.01.
     alpha_norm : float, optional
         The normal/cross-sectional penalty parameter used during anisotropic calculation phases.
         Default is 1.5.
@@ -233,12 +235,22 @@ def laplacian_graph_contraction(
         False. This does not change the numerical update or convergence test.
     decimation_mode : {'edge', 'triangle'}, optional
         Intermediate simplification method. The legacy edge mode remains the default
-        for direct callers and the alternating workflow. Default is 'edge'.
+        for direct callers and the alternating workflow. The 'triangle' token now
+        runs short-edge merging, compact-cycle collapse, and neighbourhood chain
+        projection. Default is 'edge'.
     voxel_spacing : tuple of float, optional
         Physical voxel spacing used by triangle geometry and flux calculations.
     dev_elongation_ratio : float, optional
-        PCA eigenvalue ratio above which triangle mode flattens a triangle into a
-        chain rather than collapsing it. Default is 25.
+        PCA ratio at or above which degree-five neighbourhoods project to
+        chains. Cycle collapse uses a separate fixed PCA cutoff of 25.
+        Default is 25.
+    dev_edge_thresh : float, optional
+        Short-edge threshold as a fraction of minimum voxel spacing in triangle
+        mode. Default is 0.05.
+    dev_peri_ratio : float, optional
+        Multiplier of the smallest voxel-face perimeter for cycle eligibility.
+        Eligible cycles also require a PCA ratio below the fixed cutoff of 25.
+        Default is 1.0.
 
     Returns
     -------
@@ -269,6 +281,14 @@ def laplacian_graph_contraction(
         raise ValueError('voxel_spacing must contain three positive finite values.')
     if not np.isfinite(dev_elongation_ratio) or dev_elongation_ratio <= 1.0:
         raise ValueError('dev_elongation_ratio must be finite and greater than 1.')
+    if decimation_mode == 'triangle' and (
+        not np.isfinite(dev_edge_thresh) or dev_edge_thresh < 0
+    ):
+        raise ValueError('dev_edge_thresh must be finite and nonnegative.')
+    if decimation_mode == 'triangle' and (
+        not np.isfinite(dev_peri_ratio) or dev_peri_ratio <= 0
+    ):
+        raise ValueError('dev_peri_ratio must be finite and positive.')
     if decimation_mode == 'triangle' and (
         binary_segmentation is None
         or np.asarray(binary_segmentation).ndim != 3
@@ -539,6 +559,8 @@ def laplacian_graph_contraction(
                 elongation_ratio=dev_elongation_ratio,
                 medialness=medialness,
                 flux_sampler=flux_sampler,
+                dev_edge_thresh=dev_edge_thresh,
+                dev_peri_ratio=dev_peri_ratio,
             )
             if i + 1 == max_iter and structural_change:
                 final_triangle_collapse = True

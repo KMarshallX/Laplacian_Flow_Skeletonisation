@@ -37,6 +37,8 @@ def _process_single_label(
     alter_init_thinning=False,
     dev_contra_graph=False,
     dev_elongation_ratio=25.0,
+    dev_edge_thresh=0.05,
+    dev_peri_ratio=1.0,
 ):
     """
     Worker function to process a single connected component label.
@@ -102,8 +104,13 @@ def _process_single_label(
     dev_contra_graph : bool, optional
         Append pre-refinement coordinates and adjacency in the default workflow.
     dev_elongation_ratio : float, optional
-        PCA eigenvalue ratio used to classify compact and elongated triangles in
-        the default workflow. Default is 25.
+        PCA ratio for neighbourhood projection. Cycle collapse uses a fixed
+        cutoff of 25.
+    dev_edge_thresh : float, optional
+        Short-edge diameter fraction in the default workflow. Default is 0.05.
+    dev_peri_ratio : float, optional
+        Smallest voxel-face perimeter multiplier for compact cycles.
+        Default is 1.0.
 
     Returns
     -------
@@ -184,6 +191,8 @@ def _process_single_label(
             decimation_mode='triangle',
             voxel_spacing=voxel_spacing,
             dev_elongation_ratio=dev_elongation_ratio,
+            dev_edge_thresh=dev_edge_thresh,
+            dev_peri_ratio=dev_peri_ratio,
         )
 
         if dev_contra_graph:
@@ -235,6 +244,8 @@ def process_components(
     alter_init_thinning=False,
     dev_contra_graph=False,
     dev_elongation_ratio=25.0,
+    dev_edge_thresh=0.05,
+    dev_peri_ratio=1.0,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -287,6 +298,8 @@ def process_components(
                 alter_init_thinning,
                 dev_contra_graph,
                 dev_elongation_ratio,
+                dev_edge_thresh,
+                dev_peri_ratio,
             )
         )
 

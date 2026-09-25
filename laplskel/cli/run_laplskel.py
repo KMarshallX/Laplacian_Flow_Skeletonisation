@@ -164,7 +164,7 @@ def _get_parser():
         dest='decimate_every',
         type=int,
         default=200,
-        help='Run default-workflow triangle decimation every N steps [Default=200].',
+        help='Run default-workflow graph decimation every N steps [Default=200].',
     )
     optional.add_argument(
         '--dec_grid_size',
@@ -173,7 +173,7 @@ def _get_parser():
         default=0.01,
         help=(
             'Legacy edge-decimation threshold retained for compatibility; it does '
-            'not affect default-workflow triangle decimation.'
+            'not affect default-workflow graph decimation.'
         ),
     )
     optional.add_argument(
@@ -183,8 +183,29 @@ def _get_parser():
         type=float,
         default=25.0,
         help=(
-            'Developmental PCA eigenvalue ratio above which eligible triangles '
-            'are flattened into chains [Default=25].'
+            'Developmental PCA threshold for projecting degree-five '
+            'neighbourhoods onto chains. Cycles use a fixed cutoff of 25 '
+            '[Default=25].'
+        ),
+    )
+    optional.add_argument(
+        '--dev_edge_thresh',
+        type=float,
+        default=0.05,
+        help=(
+            'Merge connected edges shorter than this fraction of the smallest '
+            'voxel spacing [Default=0.05]. Zero disables optional short-edge '
+            'merging; connected coincident nodes still merge.'
+        ),
+    )
+    optional.add_argument(
+        '--dev_peri_ratio',
+        type=float,
+        default=1.0,
+        help=(
+            'Cycle perimeter limit as a multiple of the smallest voxel-face '
+            'perimeter [Default=1.0]. Larger values admit larger cycles, which '
+            'must also have a PCA ratio below the fixed cutoff of 25.'
         ),
     )
     optional.add_argument(
