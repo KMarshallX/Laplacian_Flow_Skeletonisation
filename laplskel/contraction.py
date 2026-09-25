@@ -135,6 +135,26 @@ def edge_collapse_decimation(
     return new_X, new_adj, new_medialness
 
 
+def _project_escaped_nodes(coordinates, foreground, closest_indices):
+    """Project nodes outside the rounded foreground onto its nearest voxel."""
+    voxel_positions = np.rint(coordinates).astype(np.intp)
+    volume_bounds = np.asarray(foreground.shape)
+    out_of_bounds = np.any(
+        (voxel_positions < 0) | (voxel_positions >= volume_bounds), axis=1
+    )
+    lookup_positions = np.clip(voxel_positions, 0, volume_bounds - 1)
+    ix, iy, iz = lookup_positions.T
+    escaped = out_of_bounds | (foreground[ix, iy, iz] == 0)
+    escaped_count = int(np.sum(escaped))
+    if escaped_count:
+        projected = [
+            indices[ix[escaped], iy[escaped], iz[escaped]]
+            for indices in closest_indices
+        ]
+        coordinates[escaped] = np.stack(projected, axis=1).astype(float)
+    return coordinates, escaped_count
+
+
 def laplacian_graph_contraction(
     X_init,
     adj_init,
@@ -183,8 +203,8 @@ def laplacian_graph_contraction(
         If True, applies directionally weighted affinity rules prioritizing cross-sectional
         radial contraction over structural longitudinal shrinkage. Default is True.
     enforce_containment : bool, optional
-        If True, applies a hard projection constraint to force nodes drifting out of the
-        foreground mask onto the closest inner boundary shell surface voxel. Default is False.
+        If True, project escaped nodes onto the nearest foreground voxel before
+        each update and again after its solve. Default is False.
     w_L : float, optional
         Contraction weight coefficient forcing nodes toward localized neighborhood geometric centers.
         Default is 0.5.
@@ -222,7 +242,8 @@ def laplacian_graph_contraction(
         Default is 0.1.
     local_pca_hops : int, optional
         Number of graph hops included in each node's neighborhood when estimating
-        local tangent directions. Default is 1.
+        local tangent directions. Degree-one nodes use their incident edge.
+        Default is 1.
     solver : ['LU', 'CG', 'AMGCG'], string, optional
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big
@@ -310,8 +331,6 @@ def laplacian_graph_contraction(
     if needs_edt and binary_segmentation is not None:
         print('Computing 3D EDT Map and boundary projection lookup tensors...')
         edt_volume = ndimage.distance_transform_edt(binary_segmentation)
-        vol_shape = binary_segmentation.shape
-
         if enforce_containment:
             # Inverse transform tells background voxels how far they are from the foreground target mask
             _, closest_vessels_indices = ndimage.distance_transform_edt(
@@ -351,6 +370,16 @@ def laplacian_graph_contraction(
         if i == max_iter and not final_triangle_collapse:
             break
         n_vertices = X.shape[0]
+        iteration_start = X.copy()
+        preprojected = 0
+        preproject_max_displacement = 0.0
+        if enforce_containment:
+            X, preprojected = _project_escaped_nodes(
+                X, binary_segmentation, closest_vessels_indices
+            )
+            preproject_max_displacement = np.max(
+                np.linalg.norm(X - iteration_start, axis=1)
+            )
 
         # 1. Compute chosen Laplacian variant
         L = compute_laplacian_matrix(
@@ -490,39 +519,13 @@ def laplacian_graph_contraction(
 
         # 4. Explicit Hard-Voxel Containment Constraint Projection
         if enforce_containment:
-            # Record out-of-bounds positions before clipping for safe array lookup.
-            voxel_positions = np.rint(X_next).astype(np.intp)
-            volume_bounds = np.asarray(vol_shape)
-            out_of_bounds = np.any(
-                (voxel_positions < 0) | (voxel_positions >= volume_bounds), axis=1
+            X_next, escaped_count = _project_escaped_nodes(
+                X_next, binary_segmentation, closest_vessels_indices
             )
-            lookup_positions = np.clip(voxel_positions, 0, volume_bounds - 1)
-            ix_next, iy_next, iz_next = lookup_positions.T
-
-            escaped_mask = out_of_bounds | (
-                binary_segmentation[ix_next, iy_next, iz_next] == 0
-            )
-            escaped_count = np.sum(escaped_mask)
-
-            if escaped_count > 0:
-                # Extract precomputed closest coordinate index maps for escaped nodes
-                proj_x = closest_vessels_indices[0][
-                    ix_next[escaped_mask], iy_next[escaped_mask], iz_next[escaped_mask]
-                ]
-                proj_y = closest_vessels_indices[1][
-                    ix_next[escaped_mask], iy_next[escaped_mask], iz_next[escaped_mask]
-                ]
-                proj_z = closest_vessels_indices[2][
-                    ix_next[escaped_mask], iy_next[escaped_mask], iz_next[escaped_mask]
-                ]
-
-                # Project continuous coordinates onto the target boundary shell voxels
-                X_next[escaped_mask] = np.stack(
-                    [proj_x, proj_y, proj_z], axis=1
-                ).astype(float)
+            if escaped_count:
                 max_pull += f' [Projected: {escaped_count} escaped nodes]'
 
-        movements = np.linalg.norm(X_next - X, axis=1)
+        movements = np.linalg.norm(X_next - iteration_start, axis=1)
         displacement = np.mean(movements)
         max_displacement = np.max(movements)
         X = X_next
@@ -530,12 +533,20 @@ def laplacian_graph_contraction(
         iteration_label = f'{i + 1}/{max_iter}'
         if i == max_iter:
             iteration_label += ' (post-collapse update)'
+        preprojection_note = (
+            f' [Pre-projected: {preprojected} escaped nodes]' if preprojected else ''
+        )
         print(
             f'Iter {iteration_label} - Remaining Nodes: {X.shape[0]} - '
-            f'Mean Drift: {displacement:.5f} - Max Drift: {max_displacement:.5f}{max_pull}'
+            f'Mean Drift: {displacement:.5f} - Max Drift: {max_displacement:.5f}'
+            f'{max_pull}{preprojection_note}'
         )
 
-        small_step = max_displacement < tol and step_solved
+        small_step = (
+            max_displacement < tol
+            and preproject_max_displacement < tol
+            and step_solved
+        )
         structural_change = False
         if decimation_mode == 'edge' and (
             (i + 1) % decimate_every == 0 or small_step or i + 1 == max_iter

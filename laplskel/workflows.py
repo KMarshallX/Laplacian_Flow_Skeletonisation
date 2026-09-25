@@ -65,9 +65,8 @@ def laplacian_skeletonisation(
         Enables anisotropic geometry handling to penalize internal longitudinal
         shortening vectors. Default is True.
     enforce_containment : bool, optional
-        If True, applies a hard projection constraint to force nodes drifting out of the
-        foreground mask onto the closest inner boundary shell surface voxel.
-        Default is False.
+        If True, project escaped nodes to the nearest foreground voxel before
+        each contraction update and after its solve. Default is False.
     beta_edt : float, optional
         Scaling modulation weight assigned to boundary energy calculation properties.
         Default is 1.0.
@@ -105,7 +104,8 @@ def laplacian_skeletonisation(
         Default is 26.
     local_pca_hops : int, optional
         Number of graph hops included in each node's neighborhood when estimating
-        local tangent directions. Default is 1.
+        local tangent directions. Degree-one nodes use their incident edge.
+        Default is 1.
     solver : ['LU', 'CG', 'AMGCG'], string, optional
         The solver to use to solve the linear system Ax = b. LU uses SuperLU, a direct
         solver, CG uses Conjugate Gradient (iterative solver), better for memory on big

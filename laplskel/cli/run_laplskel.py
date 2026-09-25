@@ -115,8 +115,8 @@ def _get_parser():
         '--enforce_containment',
         action='store_true',
         help=(
-            'Apply a hard projection constraint to force nodes drifting out of the '
-            'foreground mask onto the closest inner boundary shell surface voxel.'
+            'Project escaped nodes to the nearest foreground voxel before each '
+            'contraction update and after its solve.'
         ),
     )
     optional.add_argument(
@@ -234,8 +234,8 @@ def _get_parser():
         type=_positive_integer,
         default=1,
         help=(
-            'Number of graph hops used for each local tangent PCA neighborhood '
-            '[Default=1].'
+            'Graph hops used for local tangent PCA at nodes with at least two '
+            'neighbors; terminal nodes use their incident edge [Default=1].'
         ),
     )
     optional.add_argument(
