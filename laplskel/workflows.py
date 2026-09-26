@@ -62,8 +62,8 @@ def laplacian_skeletonisation(
         Enables anisotropic geometry handling to penalize internal longitudinal
         shortening vectors. Default is True.
     enforce_containment : bool, optional
-        If True, applies a hard projection constraint to force nodes drifting out of the
-        foreground mask onto the closest inner boundary shell surface voxel.
+        If True, snaps nodes outside continuous foreground voxel cubes to the nearest
+        foreground voxel centre before and during contraction.
         Default is False.
     beta_edt : float, optional
         Scaling modulation weight assigned to boundary energy calculation properties.

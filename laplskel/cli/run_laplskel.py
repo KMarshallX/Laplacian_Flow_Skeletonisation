@@ -115,8 +115,8 @@ def _get_parser():
         '--enforce_containment',
         action='store_true',
         help=(
-            'Apply a hard projection constraint to force nodes drifting out of the '
-            'foreground mask onto the closest inner boundary shell surface voxel.'
+            'Snap nodes outside continuous foreground voxel cubes to the nearest '
+            'foreground voxel centre before and during contraction.'
         ),
     )
     optional.add_argument(

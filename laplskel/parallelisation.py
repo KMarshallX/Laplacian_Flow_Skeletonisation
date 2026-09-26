@@ -54,8 +54,8 @@ def _process_single_label(
         Enables anisotropic geometry handling to penalize internal longitudinal
         shortening vectors.
     enforce_containment : bool
-        If True, applies a hard projection constraint to force nodes drifting out of the
-        foreground mask onto the closest inner boundary shell surface voxel.
+        If True, snaps nodes outside continuous foreground voxel cubes to the nearest
+        foreground voxel centre before and during contraction.
     beta_edt : float
         Scaling modulation weight assigned to boundary energy calculation properties.
     w_L : float
