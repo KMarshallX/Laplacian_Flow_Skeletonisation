@@ -17,10 +17,16 @@ from itertools import product
 import numpy as np
 from scipy import ndimage, sparse
 from scipy.spatial import cKDTree
+from scipy.sparse.linalg import splu
 
 from .graph import compute_sparse_adjacency_matrix
-from .medial import compute_medialness
 from .objects import UnionFind
+from .utils import (
+    _edge_voxels,
+    _foreground_voxel,
+    _nonincident_intersections,
+    _valid_node_move,
+)
 
 
 _FOREGROUND = ndimage.generate_binary_structure(3, 3)
@@ -381,44 +387,184 @@ def _path_error(points, start, end):
     )
 
 
-def _fit_geometry(coordinates, edges, guidance, mask, medial_boost):
-    """Fit each voxel's interior point between fixed edge contact points.
+def _fit_frozen_graph(
+    coordinates, edges, mask, *, voxel_spacing=(1., 1., 1.),
+    smoothing_strength=1., max_sweeps=100,
+):
+    """Fit existing degree-two nodes with frozen weights and exact fixed nodes.
 
-    Each edge gets a fixed midpoint shared by its two source voxel cubes. A
-    fitted point stays inside its own cube, so the two half-edges and their
-    deformation stay inside the foreground even at diagonal-only contacts.
-    Junctions and endpoints stay fixed. For other points the weighted quadratic
-    fit has a closed-form minimum, clipped to the voxel's convex bounds.
+    Minimize lambda*||L_degree_two X||^2 + ||X-X_reference||^2 in physical
+    space. Inverse-length affinities are normalized by the initial median edge
+    length. Single-node swept triangles certify every accepted deformation.
+    Returns voxel coordinates, unchanged edges, and numerical diagnostics.
     """
-    if not len(edges):
-        return coordinates, edges
-    degree = np.bincount(edges.ravel(), minlength=len(coordinates))
-    contacts = coordinates[edges].mean(axis=1)
-    sums = np.zeros_like(coordinates)
-    np.add.at(sums, edges[:, 0], contacts)
-    np.add.at(sums, edges[:, 1], contacts)
-    nearest = cKDTree(guidance).query(coordinates)[1]
-    targets = np.clip(guidance[nearest], coordinates - 0.49, coordinates + 0.49)
-    edt = ndimage.distance_transform_edt(np.pad(mask, 1))[1:-1, 1:-1, 1:-1]
-    reference_radius = ndimage.map_coordinates(edt, coordinates.T, order=1)
-    target_radius = ndimage.map_coordinates(edt, targets.T, order=1)
-    # An unconverged dense flow can drift towards a wall. Do not give that
-    # displacement extra retention at a better-centred reference voxel.
-    targets[target_radius < reference_radius] = coordinates[
-        target_radius < reference_radius
-    ]
-    weights = medial_boost ** (2 * compute_medialness(edt, coordinates))
-    fitted = (weights[:, None] * targets + sums) / (weights + degree)[:, None]
-    fitted = np.clip(fitted, coordinates - 0.49, coordinates + 0.49)
-    fitted[degree != 2] = coordinates[degree != 2]
-    portals = np.arange(len(edges)) + len(coordinates)
-    split_edges = np.vstack(
-        (
-            np.column_stack((edges[:, 0], portals)),
-            np.column_stack((portals, edges[:, 1])),
-        )
+    reference_voxels = np.asarray(coordinates, dtype=float).copy()
+    edges = np.asarray(edges, dtype=int).reshape(-1, 2).copy()
+    mask = np.asarray(mask, dtype=bool)
+    spacing = np.asarray(voxel_spacing, dtype=float)
+    if (spacing.shape != (3,) or not np.all(np.isfinite(spacing))
+            or np.any(spacing <= 0)):
+        raise ValueError('voxel_spacing must contain three positive finite values.')
+    if not np.isfinite(smoothing_strength) or smoothing_strength < 0:
+        raise ValueError('smoothing_strength must be finite and nonnegative.')
+    if max_sweeps < 1:
+        raise ValueError('max_sweeps must be positive.')
+    if (reference_voxels.ndim != 2 or reference_voxels.shape[1] != 3
+            or not np.all(np.isfinite(reference_voxels))):
+        raise ValueError('Graph coordinates must be finite with shape (N, 3).')
+    if mask.ndim != 3 or not np.any(mask):
+        raise ValueError('Fitting requires a nonempty 3D foreground mask.')
+    if np.any(edges < 0) or np.any(edges >= len(reference_voxels)):
+        raise ValueError('Graph edge index is out of bounds.')
+    if len({tuple(sorted(edge)) for edge in edges}) != len(edges):
+        raise ValueError('Graph contains duplicate edges.')
+    physical = reference_voxels * spacing
+    lengths = np.linalg.norm(physical[edges[:, 0]] - physical[edges[:, 1]], axis=1)
+    if np.any(lengths <= 1e-8 * np.min(spacing)):
+        raise ValueError('Initial graph contains a degenerate edge.')
+    for point in reference_voxels:
+        _foreground_voxel(point, mask.shape, mask)
+    for u, v in edges:
+        _edge_voxels(reference_voxels[u], reference_voxels[v], mask.shape, mask)
+    if _nonincident_intersections(reference_voxels, edges, spacing):
+        raise ValueError('Initial graph contains an unintended intersection.')
+    degree = np.bincount(edges.ravel(), minlength=len(reference_voxels))
+    free = np.flatnonzero(degree == 2)
+    fixed = np.flatnonzero(degree != 2)
+    median_length = float(np.median(lengths)) if len(lengths) else 0.
+    diagnostics = {
+        'status': 'converged', 'lambda': float(smoothing_strength),
+        'median_edge_length': median_length, 'sweeps': 0,
+        'rejected_trials': 0, 'relative_residual': 0.,
+        'initial_bending_energy': 0., 'bending_energy': 0.,
+        'retention_energy': 0., 'max_displacement': 0., 'energy_history': [0.],
+    }
+    if not len(free):
+        return reference_voxels, edges, diagnostics
+    # Center and scale physical coordinates for translation and length-unit
+    # invariance. This rescales the entire physical objective by one constant.
+    origin = physical.mean(axis=0)
+    reference = (physical - origin) / median_length
+    weights = median_length / lengths
+    rows = np.concatenate((edges[:, 0], edges[:, 1]))
+    cols = np.concatenate((edges[:, 1], edges[:, 0]))
+    adjacency = sparse.csr_matrix((np.tile(weights, 2), (rows, cols)),
+                                  shape=(len(reference), len(reference)))
+    laplacian = (
+        sparse.diags(np.asarray(adjacency.sum(axis=1)).ravel()) - adjacency
+    )[free]
+    system = (sparse.eye(len(reference), format='csr')
+              + smoothing_strength * (laplacian.T @ laplacian)).tocsr()
+    right = reference[free] - system[free][:, fixed] @ reference[fixed]
+    free_system = system[free][:, free].tocsc()
+    scale = max(np.linalg.norm(right), np.linalg.norm(free_system @ reference[free]),
+                np.finfo(float).eps)
+
+    def residual(points):
+        return float(np.linalg.norm(system[free] @ points - reference[free]) / scale)
+
+    def energy(points):
+        return float(smoothing_strength * np.sum((laplacian @ points) ** 2)
+                     + np.sum((points - reference) ** 2))
+
+    def voxel_points(points):
+        output = (points * median_length + origin) / spacing
+        output[fixed] = reference_voxels[fixed]
+        return output
+
+    current = reference.copy()
+    initial_energy = energy(current)
+    history = [initial_energy]
+    diagnostics['initial_bending_energy'] = float(
+        np.sum((laplacian @ current) ** 2) * median_length ** 2
     )
-    return np.vstack((fitted, contacts)), split_edges
+    if residual(current) > 1e-8:
+        try:
+            target = reference.copy()
+            target[free] = splu(free_system).solve(right)
+        except (RuntimeError, ValueError) as error:
+            raise RuntimeError('Frozen graph fitting linear solve failed.') from error
+        if not np.all(np.isfinite(target)) or residual(target) > 1e-8:
+            raise RuntimeError('Frozen graph fitting produced an inaccurate solution.')
+        # Certify an explicit single-node route to the unconstrained optimum.
+        route = reference_voxels.copy()
+        target_voxels = voxel_points(target)
+        valid = True
+        for vertex in free:
+            if np.array_equal(route[vertex], target_voxels[vertex]):
+                continue
+            if not _valid_node_move(
+                route, edges, vertex, target_voxels[vertex], mask, spacing
+            ):
+                valid = False
+                diagnostics['rejected_trials'] += 1
+                break
+            route[vertex] = target_voxels[vertex]
+        if valid and energy(target) < initial_energy:
+            current = target
+            history.append(energy(current))
+        else:
+            tolerance = 1e-6 * float(np.min(spacing)) / median_length
+            diagonal = system.diagonal()
+            current_voxels = reference_voxels.copy()
+            for sweep in range(max_sweeps):
+                largest_move = 0.
+                for vertex in free:
+                    row = system.getrow(vertex)
+                    gradient = (row @ current)[0] - reference[vertex]
+                    displacement = -gradient / diagonal[vertex]
+                    if not np.all(np.isfinite(displacement)):
+                        raise RuntimeError(
+                            'Frozen graph fitting produced a non-finite update.'
+                        )
+                    for halving in range(21):
+                        delta = displacement * (0.5 ** halving)
+                        change = (
+                            2 * gradient @ delta + diagonal[vertex] * (delta @ delta)
+                        )
+                        if change >= 0:
+                            break
+                        proposal = (
+                            (current[vertex] + delta) * median_length + origin
+                        ) / spacing
+                        if _valid_node_move(
+                            current_voxels, edges, vertex, proposal, mask, spacing
+                        ):
+                            current[vertex] += delta
+                            current_voxels[vertex] = proposal
+                            largest_move = max(
+                                largest_move, float(np.linalg.norm(delta))
+                            )
+                            break
+                        diagnostics['rejected_trials'] += 1
+                history.append(energy(current))
+                diagnostics['sweeps'] = sweep + 1
+                if residual(current) <= 1e-8:
+                    break
+                if largest_move < tolerance:
+                    diagnostics['status'] = 'constraint-limited'
+                    break
+            else:
+                diagnostics['status'] = 'iteration-limited'
+    diagnostics['relative_residual'] = residual(current)
+    # Small motion without constraints can be slow quadratic convergence.
+    if (diagnostics['status'] == 'constraint-limited'
+            and not diagnostics['rejected_trials']):
+        diagnostics['status'] = 'iteration-limited'
+    output = voxel_points(current)
+    diagnostics['bending_energy'] = float(
+        np.sum((laplacian @ current) ** 2) * median_length ** 2
+    )
+    diagnostics['retention_energy'] = float(
+        np.sum((current - reference) ** 2) * median_length ** 2
+    )
+    diagnostics['max_displacement'] = float(np.max(np.linalg.norm(
+        (output - reference_voxels) * spacing, axis=1
+    )))
+    diagnostics['energy_history'] = [value * median_length ** 2 for value in history]
+    if _nonincident_intersections(output, edges, spacing):
+        raise RuntimeError('Frozen graph fitting introduced an intersection.')
+    return output, edges, diagnostics
 
 
 def _simplify_paths(coordinates, edges, mask, tolerance):
@@ -477,6 +623,8 @@ def refine_graph(
     merge_tolerance=0.25,
     w_H_medial=1.0,
     return_paths=False,
+    *,
+    voxel_spacing=(1., 1., 1.),
 ):
     """Extract a graph with every foreground tunnel and simplify its geometry.
 
@@ -491,9 +639,13 @@ def refine_graph(
         Maximum polyline deviation in voxel units during degree-two merging.
         Zero retains the reference sampling. No value permits tunnel removal.
     w_H_medial : float, optional
-        Retention boost for the bounded final geometric fit. Default is 1.
+        Retained for call compatibility; final fitting uses uniform retention.
+        This value no longer weights final fitting. Default is 1.
     return_paths : bool, optional
         Also return reference voxels and the retained edge polylines for export.
+    voxel_spacing : tuple of float, optional
+        Three positive physical voxel lengths used by final fitting.
+        Defaults to (1, 1, 1); returned coordinates remain in voxel units.
 
     Returns
     -------
@@ -533,10 +685,27 @@ def refine_graph(
     coordinates = _thin_foreground(mask, guidance).astype(float)
     reference_voxels = coordinates.astype(int)
     edges, tunnels = _tunnel_graph(coordinates)
-    coordinates, edges = _fit_geometry(coordinates, edges, guidance, mask, w_H_medial)
+    coordinates, edges, diagnostics = _fit_frozen_graph(
+        coordinates, edges, mask, voxel_spacing=voxel_spacing
+    )
+    print(
+        f"Frozen fit: {diagnostics['status']}; lambda={diagnostics['lambda']:g}, "
+        f"median physical edge={diagnostics['median_edge_length']:.6g}, "
+        f"uniform reference retention; residual={diagnostics['relative_residual']:.3g}; "
+        f"merge_tolerance={merge_tolerance:g} voxels."
+    )
+    signature = branch_complex_signature(coordinates, edges)
     coordinates, edges, paths = _simplify_paths(
         coordinates, edges, mask, merge_tolerance
     )
+    if branch_complex_signature(coordinates, edges) != signature:
+        raise RuntimeError('Refinement changed the extracted branch connectivity.')
+    for (u, v), path in paths.items():
+        if (not np.array_equal(path[0], coordinates[u])
+                or not np.array_equal(path[-1], coordinates[v])):
+            raise RuntimeError('Refinement edge path endpoints are inconsistent.')
+        for start, end in zip(path[:-1], path[1:]):
+            _edge_voxels(start, end, mask.shape, mask)
     if len(edges):
         rows = np.concatenate((edges[:, 0], edges[:, 1]))
         cols = np.concatenate((edges[:, 1], edges[:, 0]))
