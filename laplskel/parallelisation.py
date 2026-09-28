@@ -36,6 +36,8 @@ def _process_single_label(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    lambda_f=1.0,
+    lambda_parallel=1.0,
 ):
     """
     Worker function to process a single connected component label.
@@ -100,6 +102,9 @@ def _process_single_label(
         Default False; ignored by the default workflow.
     dev_contra_graph : bool, optional
         Append pre-refinement coordinates and adjacency in the default workflow.
+    lambda_f, lambda_parallel : float, optional
+        Flux attraction and longitudinal resistance weights. Default 1.0 each;
+        ignored by alternating mode.
 
     Returns
     -------
@@ -177,6 +182,9 @@ def _process_single_label(
             decimate_every=decimate_every,
             min_edge_length=min_edge_length,
             solver=solver,
+            lambda_f=lambda_f,
+            lambda_parallel=lambda_parallel,
+            voxel_spacing=voxel_spacing,
         )
 
         if dev_contra_graph:
@@ -227,6 +235,8 @@ def process_components(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    lambda_f=1.0,
+    lambda_parallel=1.0,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -278,6 +288,8 @@ def process_components(
                 contraction_steps,
                 alter_init_thinning,
                 dev_contra_graph,
+                lambda_f,
+                lambda_parallel,
             )
         )
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import os
+import warnings
 
 import numpy as np
 from nigsp import io
 from scipy import sparse
 
+from .contraction_objective import validate_segmentation
 from .parallelisation import process_components
 from .refinement import foreground_topology
 from .utils import (
@@ -44,6 +46,8 @@ def laplacian_skeletonisation(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    lambda_f=1.0,
+    lambda_parallel=1.0,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -137,6 +141,10 @@ def laplacian_skeletonisation(
         Also export the contracted graph before thinning as
         <output_stem>_intermediate.graphml beside the normal outputs.
         Ignored in alternating mode.
+    lambda_f, lambda_parallel : float, optional
+        Flux attraction and longitudinal resistance weights, default 1.0 each.
+        Both zero selects the original contraction objective. Ignored by
+        alternating mode. New physical quantities use millimetres.
 
     Returns
     -------
@@ -152,6 +160,14 @@ def laplacian_skeletonisation(
     ValueError
         If the loaded structural NIfTI mask image is completely empty or lacks foreground elements.
     """
+    for name, weight in (('lambda_f', lambda_f), ('lambda_parallel', lambda_parallel)):
+        if not np.isfinite(weight) or weight < 0:
+            raise ValueError(f'{name} must be finite and nonnegative.')
+    if not alternating and (lambda_f > 0 or lambda_parallel > 0):
+        if not np.isfinite(w_H_base) or w_H_base <= 0:
+            raise ValueError(
+                'w_H_base must be finite and positive for the expanded objective.'
+            )
     if not np.isfinite(merge_tolerance) or merge_tolerance < 0:
         raise ValueError('merge_tolerance must be finite and >= 0.')
     if alternating and (
@@ -168,8 +184,17 @@ def laplacian_skeletonisation(
     print(f'Ingesting NIfTI image: {nifti_path}')
     _, volume_data, img = io.load_nifti_get_mask(nifti_path, is_mask=True, ndim=3)
 
-    if not np.any(volume_data):
-        raise ValueError('Provided segmentation volume lacks any foreground structure.')
+    volume_data = validate_segmentation(volume_data)
+    voxel_spacing = img.header.get_zooms()[:3]
+    if not alternating and (lambda_f > 0 or lambda_parallel > 0):
+        unit = img.header.get_xyzt_units()[0]
+        if unit == 'unknown':
+            warnings.warn(
+                'NIfTI spatial units are unspecified; assuming voxel spacing is in mm.',
+                RuntimeWarning, stacklevel=2,
+            )
+        factor = {'meter': 1000.0, 'mm': 1.0, 'micron': 0.001, 'unknown': 1.0}[unit]
+        voxel_spacing = tuple(value * factor for value in voxel_spacing)
 
     # Process each component independently if separate_streams is True
     if separate_streams:
@@ -198,10 +223,12 @@ def laplacian_skeletonisation(
         solver,
         merge_tolerance,
         alternating,
-        img.header.get_zooms()[:3],
+        voxel_spacing,
         contraction_steps,
         alter_init_thinning,
         dev_contra_graph,
+        lambda_f,
+        lambda_parallel,
     )
 
     print('Reuniting results from parallel jobs.')

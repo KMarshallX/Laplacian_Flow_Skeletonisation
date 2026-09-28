@@ -598,6 +598,8 @@ def alternating_graph_skeletonisation(
             local_pca_hops=local_pca_hops,
             solver=solver,
             provisional=True,
+            lambda_f=0.0,
+            lambda_parallel=0.0,
         )
         sampled_radii = original_edt[tuple(voxels.astype(int).T)]
         direction_window = max(

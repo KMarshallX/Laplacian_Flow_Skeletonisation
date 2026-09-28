@@ -7,6 +7,14 @@ from scipy import ndimage, sparse
 from scipy.sparse.linalg import cg, spsolve
 from scipy.spatial import cKDTree
 
+from .contraction_objective import (
+    DistanceFluxSampler,
+    FrozenObjective,
+    physical_tangents,
+    solve_objective,
+    validate_segmentation,
+    validate_spacing,
+)
 from .graph import compute_laplacian_matrix
 from .medial import compute_medialness
 from .objects import UnionFind
@@ -157,7 +165,7 @@ def _project_escaped_nodes(points, foreground_tree):
 def laplacian_graph_contraction(
     X_init,
     adj_init,
-    binary_segmentation=None,
+    binary_segmentation,
     use_edt=True,
     use_anisotropic=True,
     enforce_containment=False,
@@ -175,6 +183,9 @@ def laplacian_graph_contraction(
     local_pca_hops=1,
     solver='CG',
     provisional=False,
+    lambda_f=1.0,
+    lambda_parallel=1.0,
+    voxel_spacing=(1.0, 1.0, 1.0),
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -188,8 +199,8 @@ def laplacian_graph_contraction(
         Initial 3D coordinates of the graph vertices as an (N, 3) array.
     adj_init : scipy.sparse.csr_matrix
         Boolean sparse adjacency matrix representing initial network connectivity of shape (N, N).
-    binary_segmentation : numpy.ndarray, optional
-        The binary segmentation mask volume used to calculate the EDT profile. Default is None.
+    binary_segmentation : numpy.ndarray
+        Required finite, nonempty 3D segmentation. Nonzero values are foreground.
     use_edt : bool, optional
         If True, enables the Euclidean Distance Transform boundary potential constraint to prevent
         implosive collapse beyond true anatomy boundaries. Default is True.
@@ -247,6 +258,15 @@ def laplacian_graph_contraction(
         If True, treat ``max_iter`` as an intentional bounded contraction stage and
         do not warn when that stage ends before geometric convergence. Default is
         False. This does not change the numerical update or convergence test.
+    lambda_f : float, optional
+        Nonnegative signed-flux attraction weight. Default is 1.0. Zero skips
+        flux evaluation and its nonlinear optimisation.
+    lambda_parallel : float, optional
+        Nonnegative weight resisting physical displacement along local branches.
+        Default is 1.0. Set both new weights to zero for the original solver.
+    voxel_spacing : tuple of float, optional
+        Three positive physical voxel spacings in mm. Default is (1, 1, 1).
+        Stored coordinates and ``tol`` remain in voxel units.
 
     Returns
     -------
@@ -258,8 +278,19 @@ def laplacian_graph_contraction(
     Raises
     ------
     ValueError
-        If `w_H_medial` is smaller than 1.0.
+        If segmentation, spacing or weights are invalid. A positive finite
+        ``w_H_base`` is required when either new objective term is enabled.
     """
+    binary_segmentation = validate_segmentation(binary_segmentation)
+    voxel_spacing = validate_spacing(voxel_spacing)
+    for name, weight in (('lambda_f', lambda_f), ('lambda_parallel', lambda_parallel)):
+        if not np.isfinite(weight) or weight < 0:
+            raise ValueError(f'{name} must be finite and nonnegative.')
+    expanded_objective = lambda_f > 0 or lambda_parallel > 0
+    if expanded_objective and (not np.isfinite(w_H_base) or w_H_base <= 0):
+        raise ValueError(
+            'w_H_base must be finite and positive for the expanded objective.'
+        )
     if not np.isfinite(w_H_medial) or w_H_medial < 1.0:
         raise ValueError('w_H_medial must be finite and >= 1.0.')
     if solver not in ('CG', 'AMGCG', 'LU'):
@@ -274,31 +305,31 @@ def laplacian_graph_contraction(
     edt_volume = None
     foreground_tree = None
     medialness = None
+    initial_projection_displacement = 0.0
 
     needs_edt = use_edt or w_H_medial > 1.0
 
-    if binary_segmentation is not None:
-        if enforce_containment:
-            foreground_centres = np.argwhere(binary_segmentation)
-            if not len(foreground_centres):
-                raise ValueError('Containment requires a nonempty foreground mask.')
-            foreground_tree = cKDTree(foreground_centres)
-            X, initial_count = _project_escaped_nodes(X, foreground_tree)
-            if initial_count:
-                print(f'Projected {initial_count} initial escaped nodes to foreground centres.')
+    if enforce_containment:
+        foreground_tree = cKDTree(np.argwhere(binary_segmentation))
+        initial_X = X.copy()
+        X, initial_count = _project_escaped_nodes(X, foreground_tree)
+        if initial_count:
+            initial_projection_displacement = np.max(
+                np.linalg.norm(X - initial_X, axis=1)
+            )
+            print(
+                f'Projected {initial_count} initial escaped nodes '
+                'to foreground centres.'
+            )
 
-        if needs_edt:
-            print('Computing 3D EDT Map...')
-            edt_volume = ndimage.distance_transform_edt(binary_segmentation)
-        if w_H_medial > 1.0:
-            medialness = compute_medialness(edt_volume, X)
-    elif needs_edt or enforce_containment:
-        print(
-            'Warning: No segmentation mask provided. Falling back to classic approach.'
-        )
-        use_edt = False
-        enforce_containment = False
-        w_H_medial = 1.0
+    if needs_edt:
+        print('Computing 3D EDT Map...')
+        edt_volume = ndimage.distance_transform_edt(binary_segmentation)
+    if w_H_medial > 1.0:
+        medialness = compute_medialness(edt_volume, X)
+    flux_sampler = (
+        DistanceFluxSampler(binary_segmentation, voxel_spacing) if lambda_f else None
+    )
 
     edt_string = f' beta_edt (EDT scale factor)={beta_edt},' if use_edt else ''
 
@@ -312,6 +343,7 @@ def laplacian_graph_contraction(
         f' - EDT={use_edt}\n'
         f' - Medial Boost={w_H_medial if medialness is not None else False}\n'
         f' - Hard Containment={enforce_containment}\n'
+        f' - Flux weight={lambda_f}, longitudinal weight={lambda_parallel}\n'
         f' - Decimation step={decimate_every}\n'
     )
 
@@ -328,7 +360,6 @@ def laplacian_graph_contraction(
             alpha_tang=alpha_tang,
             local_pca_hops=local_pca_hops,
         )
-        L_squared = L.T.dot(L)
 
         # 2. Extract localized retention matrix mapping
         max_pull = ''
@@ -359,98 +390,130 @@ def laplacian_graph_contraction(
         elif medialness is not None:
             max_pull = f' - Max Medial w_H Pull: {np.max(w_H_per_node):.4f}'
 
-        # 3. Solve Implicit Update System equations
-        A = (w_L**2) * L_squared + W_H_sq
-        # Solve for motion, so large anchors or coordinate offsets cannot make
-        # CG accept the previous coordinates without taking an accurate step.
-        B = -(w_L**2) * L.T.dot(L.dot(X - X.mean(axis=0)))
-        step_solved = True
-
-        # Select solver between LU, AMGCG, and CG.
-        if solver == 'AMGCG':
-            # Prepare fallback to CG if AMGCG cannot run due to too many voxels.
-            try:
-                import pyamg
-            except ImportError:
-                warnings.warn(
-                    'PyAMG is unavailable; switching to CG.',
-                    RuntimeWarning,
-                    stacklevel=2,
+        # 3. Solve the expanded objective or the original independent-axis system.
+        if expanded_objective:
+            tangents = np.zeros_like(X)
+            confidence = np.zeros(n_vertices)
+            if lambda_parallel:
+                tangents, confidence = physical_tangents(
+                    X, adj, voxel_spacing, local_pca_hops
                 )
-                solver = 'CG'
+            objective = FrozenObjective(
+                X, L, w_H_per_node, w_L, voxel_spacing, tangents, confidence,
+                lambda_f, lambda_parallel, flux_sampler,
+            )
+            project = None
+            if enforce_containment:
+                def project(points):
+                    return _project_escaped_nodes(points, foreground_tree)
+            result = solve_objective(objective, solver, project)
+            X_next = result.coordinates
+            step_solved = result.status == 'converged'
+            max_pull += (
+                f' [Objective: {result.status}, updates={result.updates}, '
+                f'backtracks={result.backtracks}, projected={result.projected}]'
+            )
+            if result.status in ('stalled', 'linear_failure'):
+                warnings.warn(
+                    f'Contraction objective {result.status} at iteration {i + 1}; '
+                    'returning the last accepted geometry as provisional.',
+                    RuntimeWarning, stacklevel=2,
+                )
+                return X_next, adj
+        else:
+            # 3. Solve Implicit Update System equations
+            L_squared = L.T.dot(L)
+            A = (w_L**2) * L_squared + W_H_sq
+            # Solve for motion, so large anchors or coordinate offsets cannot make
+            # CG accept the previous coordinates without taking an accurate step.
+            B = -(w_L**2) * L.T.dot(L.dot(X - X.mean(axis=0)))
+            step_solved = True
 
-            if solver == 'AMGCG' and (
-                A.indptr.dtype == np.int64 or A.indices.dtype == np.int64
-            ):
-                max_idx = max(A.shape[0], A.nnz)
-                if max_idx <= np.iinfo(np.int32).max:
-                    A = A.copy()
-                    A.indptr = A.indptr.astype(np.int32)
-                    A.indices = A.indices.astype(np.int32)
-                else:
-                    # NNZ or shape exceeds int32 max limit (pyAMG C++ extensions will fail)
+            # Select solver between LU, AMGCG, and CG.
+            if solver == 'AMGCG':
+                # Prepare fallback to CG if AMGCG cannot run due to too many voxels.
+                try:
+                    import pyamg
+                except ImportError:
                     warnings.warn(
-                        'AMGCG does not support this matrix index range; switching '
-                        'to CG.',
+                        'PyAMG is unavailable; switching to CG.',
                         RuntimeWarning,
                         stacklevel=2,
                     )
                     solver = 'CG'
 
-        preconditioner = None
-        if solver == 'AMGCG':
-            try:
-                hierarchy = pyamg.ruge_stuben_solver(A)
-                preconditioner = hierarchy.aspreconditioner(cycle='V')
-            except (MemoryError, RuntimeError, TypeError, ValueError) as error:
-                warnings.warn(
-                    f'AMGCG setup failed ({error}); switching to CG.',
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                solver = 'CG'
+                if solver == 'AMGCG' and (
+                    A.indptr.dtype == np.int64 or A.indices.dtype == np.int64
+                ):
+                    max_idx = max(A.shape[0], A.nnz)
+                    if max_idx <= np.iinfo(np.int32).max:
+                        A = A.copy()
+                        A.indptr = A.indptr.astype(np.int32)
+                        A.indices = A.indices.astype(np.int32)
+                    else:
+                        # PyAMG C++ extensions require int32 shapes and indices.
+                        warnings.warn(
+                            'AMGCG does not support this matrix index range; switching '
+                            'to CG.',
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        solver = 'CG'
 
-        if solver == 'LU':
-            X_next = np.zeros_like(X)
-            for dim in range(3):
-                X_next[:, dim] = X[:, dim] + spsolve(A, B[:, dim])
-
-        elif solver == 'AMGCG':
-            X_next = np.zeros_like(X)
-            for dim in range(3):
-                sol, info = cg(
-                    A,
-                    B[:, dim],
-                    x0=np.zeros(n_vertices),
-                    M=preconditioner,
-                    rtol=1e-6,
-                    maxiter=500,
-                )
-                if info != 0:
-                    step_solved = False
+            preconditioner = None
+            if solver == 'AMGCG':
+                try:
+                    hierarchy = pyamg.ruge_stuben_solver(A)
+                    preconditioner = hierarchy.aspreconditioner(cycle='V')
+                except (MemoryError, RuntimeError, TypeError, ValueError) as error:
                     warnings.warn(
-                        f'CG did not converge on axis {dim} (info={info}); the '
-                        'contraction step may be inaccurate.',
+                        f'AMGCG setup failed ({error}); switching to CG.',
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                X_next[:, dim] = X[:, dim] + sol
+                    solver = 'CG'
 
-        elif solver == 'CG':
-            X_next = np.zeros_like(X)
-            for dim in range(3):
-                sol, info = cg(
-                    A, B[:, dim], x0=np.zeros(n_vertices), rtol=1e-6, maxiter=500
-                )
-                if info != 0:
-                    step_solved = False
-                    warnings.warn(
-                        f'CG did not converge on axis {dim} (info={info}); the '
-                        'contraction step may be inaccurate.',
-                        RuntimeWarning,
-                        stacklevel=2,
+            if solver == 'LU':
+                X_next = np.zeros_like(X)
+                for dim in range(3):
+                    X_next[:, dim] = X[:, dim] + spsolve(A, B[:, dim])
+
+            elif solver == 'AMGCG':
+                X_next = np.zeros_like(X)
+                for dim in range(3):
+                    sol, info = cg(
+                        A,
+                        B[:, dim],
+                        x0=np.zeros(n_vertices),
+                        M=preconditioner,
+                        rtol=1e-6,
+                        maxiter=500,
                     )
-                X_next[:, dim] = X[:, dim] + sol
+                    if info != 0:
+                        step_solved = False
+                        warnings.warn(
+                            f'CG did not converge on axis {dim} (info={info}); the '
+                            'contraction step may be inaccurate.',
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                    X_next[:, dim] = X[:, dim] + sol
+
+            elif solver == 'CG':
+                X_next = np.zeros_like(X)
+                for dim in range(3):
+                    sol, info = cg(
+                        A, B[:, dim], x0=np.zeros(n_vertices), rtol=1e-6, maxiter=500
+                    )
+                    if info != 0:
+                        step_solved = False
+                        warnings.warn(
+                            f'CG did not converge on axis {dim} (info={info}); the '
+                            'contraction step may be inaccurate.',
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                    X_next[:, dim] = X[:, dim] + sol
 
         if not np.all(np.isfinite(X_next)):
             raise RuntimeError('Contraction produced non-finite coordinates.')
@@ -464,6 +527,8 @@ def laplacian_graph_contraction(
         movements = np.linalg.norm(X_next - X, axis=1)
         displacement = np.mean(movements)
         max_displacement = np.max(movements)
+        if expanded_objective and i == 0:
+            max_displacement = max(max_displacement, initial_projection_displacement)
         X = X_next
 
         print(

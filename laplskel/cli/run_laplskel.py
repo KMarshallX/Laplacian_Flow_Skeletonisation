@@ -1,6 +1,7 @@
 """Command-line interface for Laplacian skeletonisation."""
 
 import argparse
+import math
 import sys
 
 from laplskel.workflows import laplacian_skeletonisation
@@ -17,6 +18,17 @@ def _positive_integer(value):
         raise argparse.ArgumentTypeError('must be a positive integer') from error
     if parsed <= 0:
         raise argparse.ArgumentTypeError('must be a positive integer')
+    return parsed
+
+
+def _nonnegative_weight(value):
+    """Parse a finite nonnegative objective weight."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError('must be finite and nonnegative') from error
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError('must be finite and nonnegative')
     return parsed
 
 
@@ -152,6 +164,17 @@ def _get_parser():
             'power of each node medialness score, so boundary nodes keep their '
             'baseline weight. 1.0 disables the boost [Default=1.0].'
         ),
+    )
+    optional.add_argument(
+        '--lambda_f', type=_nonnegative_weight, default=1.0,
+        help='Signed-flux attraction weight [Default=1]. Zero disables the term; '
+             'ignored with --alternating.',
+    )
+    optional.add_argument(
+        '--lambda_parallel', type=_nonnegative_weight, default=1.0,
+        help='Resistance to longitudinal movement in mm [Default=1]. '
+             'Set both new weights to zero for the original solver; '
+             'ignored with --alternating.',
     )
     optional.add_argument(
         '--tol',
