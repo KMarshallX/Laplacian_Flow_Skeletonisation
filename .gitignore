@@ -146,6 +146,8 @@ alternating_workflow.md
 
 # local dev doc
 WORKFLOW.md
+TEST_PLAN_0929.md
 
 # test instances
 /tests/*
+/image/TEST_PLAN_0929/*
