@@ -296,7 +296,7 @@ def laplacian_skeletonisation(
             output_path=f'{out_path}.graphml',
             binary_segmentation=(
                 volume_data if alter_init_thinning else None
-            ) if alternating else nifti_skel,
+            ) if alternating else volume_data,
             edge_paths=edge_paths,
         )
     else:

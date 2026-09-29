@@ -128,7 +128,8 @@ def _process_single_label(
     # Skip small noise components
     if len(X_init_local) <= 3 and (not alternating or alter_init_thinning):
         refined, adj_sparse, voxels, paths = refine_graph(
-            cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True
+            cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True,
+            voxel_spacing=voxel_spacing
         )
         X_init_global = refined + np.array(offset_origin, dtype=np.float32)
         return (
@@ -186,7 +187,8 @@ def _process_single_label(
             )
 
         label_X_local, label_adj, voxels, paths = refine_graph(
-            cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True
+            cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True,
+            voxel_spacing=voxel_spacing
         )
     label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
 

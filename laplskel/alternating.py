@@ -1,7 +1,6 @@
 """Experimental alternating geometric contraction and topological thinning."""
 
 import warnings
-from itertools import product
 
 import numpy as np
 from scipy import ndimage, sparse
@@ -19,7 +18,12 @@ from .refinement import (
     foreground_topology,
     thin_foreground_sweep,
 )
-from .utils import _edge_voxels, _foreground_voxel
+from .utils import (
+    _edge_voxels,
+    _foreground_voxel,
+    _nonincident_intersections,
+    _sweep_contained,
+)
 
 
 def _adjacency_from_edges(n_vertices, edges):
@@ -54,165 +58,6 @@ def _resample_edges(coordinates, edges, spacing):
         np.asarray(points, dtype=float),
         np.asarray(sampled_edges, dtype=int).reshape(-1, 2),
     )
-
-
-def _box_in_foreground(points, mask):
-    """Conservatively certify a box covering a moving graph edge."""
-    lower = np.ceil(np.min(points, axis=0) - 0.5 - 1e-10).astype(int)
-    upper = np.floor(np.max(points, axis=0) + 0.5 + 1e-10).astype(int)
-    if np.any(lower < 0) or np.any(upper >= mask.shape):
-        return False
-    return bool(np.all(mask[tuple(slice(a, b + 1) for a, b in zip(lower, upper))]))
-
-
-def _triangle_enters_voxel(triangle, voxel):
-    """Clip a swept triangle against the open interior of one voxel cube."""
-    polygon = [point for point in triangle]
-    epsilon = 1e-10
-    for axis in range(3):
-        for sign, boundary in (
-            (1.0, voxel[axis] - 0.5 + epsilon),
-            (-1.0, voxel[axis] + 0.5 - epsilon),
-        ):
-            if not polygon:
-                return False
-            clipped = []
-            for start, end in zip(polygon, polygon[1:] + polygon[:1]):
-                first = sign * (start[axis] - boundary)
-                second = sign * (end[axis] - boundary)
-                if first > 0:
-                    clipped.append(start)
-                if (first > 0) != (second > 0):
-                    fraction = first / (first - second)
-                    clipped.append(start + fraction * (end - start))
-            polygon = clipped
-    return bool(polygon)
-
-
-def _sweep_contained(old_start, old_end, new_start, new_end, mask):
-    """Certify the swept edge by recursively covering its triangles with voxels."""
-    triangles = (
-        np.asarray([old_start, old_end, new_start]),
-        np.asarray([new_start, old_end, new_end]),
-    )
-
-    def contained(triangle, remaining):
-        if _box_in_foreground(triangle, mask):
-            return True
-        lower = np.ceil(np.min(triangle, axis=0) - 0.5 - 1e-10).astype(int)
-        upper = np.floor(np.max(triangle, axis=0) + 0.5 + 1e-10).astype(int)
-        volume = int(np.prod(upper - lower + 1))
-        if remaining == 0 or volume <= 8:
-            probes = list(triangle)
-            probes += [
-                0.5 * (triangle[a] + triangle[b])
-                for a, b in ((0, 1), (1, 2), (2, 0))
-            ]
-            probes.append(np.mean(triangle, axis=0))
-            try:
-                for point in probes:
-                    _foreground_voxel(point, mask.shape, mask)
-            except ValueError:
-                return False
-            for voxel in product(*(range(a, b + 1) for a, b in zip(lower, upper))):
-                if (
-                    (
-                        any(
-                            value < 0 or value >= bound
-                            for value, bound in zip(voxel, mask.shape)
-                        )
-                        or not mask[voxel]
-                    )
-                    and _triangle_enters_voxel(triangle, voxel)
-                ):
-                    return False
-            return True
-        pairs = ((0, 1), (1, 2), (2, 0))
-        a, b = max(
-            pairs,
-            key=lambda pair: np.linalg.norm(
-                triangle[pair[0]] - triangle[pair[1]]
-            ),
-        )
-        c = 3 - a - b
-        middle = 0.5 * (triangle[a] + triangle[b])
-        return (
-            contained(np.asarray([triangle[a], middle, triangle[c]]), remaining - 1)
-            and contained(
-                np.asarray([middle, triangle[b], triangle[c]]), remaining - 1
-            )
-        )
-
-    return all(contained(triangle, 10) for triangle in triangles)
-
-
-def _nonincident_intersections(coordinates, edges, spacing):
-    """Detect unrepresented crossings and overlap beyond shared endpoints."""
-    physical = np.asarray(coordinates, dtype=float) * spacing
-    edges = np.asarray(edges, dtype=int).reshape(-1, 2)
-    tolerance = 1e-8 * float(np.min(spacing))
-    if not len(edges):
-        return False
-    midpoints = np.mean(physical[edges], axis=1)
-    radii = 0.5 * np.linalg.norm(physical[edges[:, 0]] - physical[edges[:, 1]], axis=1)
-    tree = cKDTree(midpoints)
-    for index, (u, v) in enumerate(edges):
-        p, q = physical[[u, v]]
-        candidates = tree.query_ball_point(
-            midpoints[index], radii[index] + np.max(radii) + tolerance
-        )
-        for other_index in candidates:
-            if other_index <= index:
-                continue
-            a, b = edges[other_index]
-            shared = {int(u), int(v)} & {int(a), int(b)}
-            if shared:
-                if len(shared) == 1:
-                    junction = shared.pop()
-                    first = physical[v if u == junction else u] - physical[junction]
-                    second = physical[b if a == junction else a] - physical[junction]
-                    if (
-                        first @ second > 0
-                        and np.linalg.norm(np.cross(first, second))
-                        <= tolerance * max(
-                            np.linalg.norm(first), np.linalg.norm(second)
-                        )
-                    ):
-                        return True
-                continue
-            r, s = physical[[a, b]]
-            if np.any(np.maximum(np.minimum(p, q), np.minimum(r, s)) >
-                      np.minimum(np.maximum(p, q), np.maximum(r, s)) + tolerance):
-                continue
-            first, second = q - p, s - r
-            difference = p - r
-            aa, bb, cc = first @ first, first @ second, second @ second
-            dd, ee = first @ difference, second @ difference
-            determinant = aa * cc - bb * bb
-            if determinant > tolerance ** 4:
-                t = np.clip((bb * ee - cc * dd) / determinant, 0.0, 1.0)
-            else:
-                t = 0.0
-            w = np.clip((bb * t + ee) / cc, 0.0, 1.0) if cc else 0.0
-            t = np.clip((bb * w - dd) / aa, 0.0, 1.0) if aa else 0.0
-            def endpoint_distance(point, start, end):
-                direction = end - start
-                length_squared = direction @ direction
-                fraction = (
-                    np.clip(((point - start) @ direction) / length_squared, 0.0, 1.0)
-                    if length_squared else 0.0
-                )
-                return np.linalg.norm(point - start - fraction * direction)
-
-            if min(
-                np.linalg.norm(p + t * first - r - w * second),
-                endpoint_distance(p, r, s),
-                endpoint_distance(q, r, s),
-                endpoint_distance(r, p, q),
-                endpoint_distance(s, p, q),
-            ) <= tolerance:
-                return True
-    return False
 
 
 def _valid_graph_update(old, proposed, edges, mask, spacing):
