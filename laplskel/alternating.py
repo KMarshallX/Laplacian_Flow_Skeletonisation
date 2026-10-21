@@ -438,7 +438,7 @@ def alternating_graph_skeletonisation(
             w_H_medial=w_H_medial,
             max_iter=contraction_steps,
             tol=tol,
-            decimate_every=contraction_steps + 1,
+            # Zero merge length suppresses node merging and adaptive decimation.
             min_edge_length=0.0,
             local_pca_hops=local_pca_hops,
             solver=solver,

@@ -28,7 +28,7 @@ def laplacian_skeletonisation(
     w_H_base=0.5,
     w_H_medial=1.0,
     tol=0.05,
-    decimate_every=1,
+    decimate_ratio=0.93,
     min_edge_length=0.01,
     downsample=False,
     seed=42,
@@ -82,9 +82,11 @@ def laplacian_skeletonisation(
     tol : float, optional
         Maximum contraction displacement in voxel units, required for three
         consecutive steps without structural changes. Default is 0.05.
-    decimate_every : int, optional
-        Frequency cadence interval defining how many contraction loop steps occur before
-        triggering an edge-collapse decimation execution. Default is 1.
+    decimate_ratio : float, optional
+        Adaptive decimation threshold in (0, 1]. Edge-collapse decimation runs once
+        three consecutive mean-drift ratios (current / previous) lie in
+        [decimate_ratio, 1]. Ignored in alternating mode, which disables merging.
+        Default is 0.93.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo
         structural merging, expressed as a fraction of the isotropic voxel length.
@@ -154,6 +156,8 @@ def laplacian_skeletonisation(
     """
     if not np.isfinite(merge_tolerance) or merge_tolerance < 0:
         raise ValueError('merge_tolerance must be finite and >= 0.')
+    if not np.isfinite(decimate_ratio) or not 0 < decimate_ratio <= 1:
+        raise ValueError('decimate_ratio must be finite and in (0, 1].')
     if alternating and (
         not isinstance(contraction_steps, int) or contraction_steps < 1
     ):
@@ -192,7 +196,7 @@ def laplacian_skeletonisation(
         tol,
         init_graph_adj,
         local_pca_hops,
-        decimate_every,
+        decimate_ratio,
         min_edge_length,
         n_jobs,
         solver,

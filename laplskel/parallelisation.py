@@ -26,7 +26,7 @@ def _process_single_label(
     tol,
     init_graph_adj,
     local_pca_hops,
-    decimate_every,
+    decimate_ratio,
     min_edge_length,
     num_features,
     solver,
@@ -74,9 +74,8 @@ def _process_single_label(
     local_pca_hops : int
         Number of graph hops included in each node's neighborhood when estimating
         local tangent directions.
-    decimate_every : int
-        Frequency cadence interval defining how many contraction loop steps occur before
-        triggering an edge-collapse decimation execution.
+    decimate_ratio : float
+        Adaptive decimation threshold in (0, 1] for consecutive mean-drift ratios.
     min_edge_length : float
         The Euclidean spatial threshold criteria below which two connected nodes undergo
         structural merging, expressed as a fraction of the isotropic voxel length.
@@ -175,7 +174,7 @@ def _process_single_label(
             w_H_medial=w_H_medial,
             tol=tol,
             local_pca_hops=local_pca_hops,
-            decimate_every=decimate_every,
+            decimate_ratio=decimate_ratio,
             min_edge_length=min_edge_length,
             solver=solver,
         )
@@ -219,7 +218,7 @@ def process_components(
     tol,
     init_graph_adj,
     local_pca_hops,
-    decimate_every,
+    decimate_ratio,
     min_edge_length,
     n_jobs,
     solver,
@@ -270,7 +269,7 @@ def process_components(
                 tol,
                 init_graph_adj,
                 local_pca_hops,
-                decimate_every,
+                decimate_ratio,
                 min_edge_length,
                 num_features,
                 solver,
