@@ -168,7 +168,7 @@ def laplacian_graph_contraction(
     delta=0.5,
     max_iter=2000,
     tol=0.05,
-    decimate_every=1,
+    decimate_ratio=0.93,
     min_edge_length=0.01,
     alpha_norm=1.5,
     alpha_tang=0.1,
@@ -222,12 +222,16 @@ def laplacian_graph_contraction(
     tol : float, optional
         Maximum vertex displacement tolerance in voxel units. Three stable steps
         without structural changes are required. Default is 0.05.
-    decimate_every : int, optional
-        Frequency cadence interval defining how many contraction loop steps occur before triggering
-        an edge-collapse decimation execution. Default is 1.
+    decimate_ratio : float, optional
+        Adaptive decimation threshold in (0, 1]. Drift is the mean node displacement
+        after containment projection. Edge-collapse decimation runs once three
+        consecutive drift ratios (current / previous) lie in [decimate_ratio, 1],
+        i.e. on the fourth valid drift. Failed solves and zero drift clear the ratio
+        history, and every decimation attempt resets it. Small-step and final-iteration
+        decimation are unchanged. Default is 0.93.
     min_edge_length : float, optional
         The Euclidean spatial threshold criteria below which two connected nodes undergo structural merging.
-        Default is 0.01.
+        A nonpositive value disables merging and the adaptive trigger. Default is 0.01.
     alpha_norm : float, optional
         The normal/cross-sectional penalty parameter used during anisotropic calculation phases.
         Default is 1.5.
@@ -258,14 +262,16 @@ def laplacian_graph_contraction(
     Raises
     ------
     ValueError
-        If `w_H_medial` is smaller than 1.0.
+        If `w_H_medial` is smaller than 1.0 or `decimate_ratio` is outside (0, 1].
     """
     if not np.isfinite(w_H_medial) or w_H_medial < 1.0:
         raise ValueError('w_H_medial must be finite and >= 1.0.')
     if solver not in ('CG', 'AMGCG', 'LU'):
         raise ValueError('solver must be CG, AMGCG, or LU.')
-    if max_iter < 1 or decimate_every < 1:
-        raise ValueError('max_iter and decimate_every must be positive.')
+    if max_iter < 1:
+        raise ValueError('max_iter must be positive.')
+    if not np.isfinite(decimate_ratio) or not 0 < decimate_ratio <= 1:
+        raise ValueError('decimate_ratio must be finite and in (0, 1].')
 
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
@@ -312,10 +318,12 @@ def laplacian_graph_contraction(
         f' - EDT={use_edt}\n'
         f' - Medial Boost={w_H_medial if medialness is not None else False}\n'
         f' - Hard Containment={enforce_containment}\n'
-        f' - Decimation step={decimate_every}\n'
+        f' - Decimation ratio={decimate_ratio}\n'
     )
 
     stable_steps = 0
+    previous_drift = None
+    qualifying_ratios = []
     for i in range(max_iter):
         n_vertices = X.shape[0]
 
@@ -466,13 +474,43 @@ def laplacian_graph_contraction(
         max_displacement = np.max(movements)
         X = X_next
 
+        # Adaptive decimation waits for the mean drift to plateau. Neither side of a
+        # ratio may come from a failed solve, and zero drift gives no ratio at all.
+        ratio_string = ''
+        if not step_solved or displacement == 0:
+            previous_drift, qualifying_ratios = None, []
+        else:
+            if previous_drift is not None:
+                ratio = displacement / previous_drift
+                if decimate_ratio <= ratio <= 1:
+                    qualifying_ratios.append(ratio)
+                else:
+                    qualifying_ratios = []
+                ratio_string = (
+                    f' - Drift Ratio: {ratio:.5f} (streak {len(qualifying_ratios)})'
+                )
+            previous_drift = displacement
+
         print(
             f'Iter {i + 1}/{max_iter} - Remaining Nodes: {X.shape[0]} - '
-            f'Mean Drift: {displacement:.5f} - Max Drift: {max_displacement:.5f}{max_pull}'
+            f'Mean Drift: {displacement:.5f} - Max Drift: {max_displacement:.5f}'
+            f'{ratio_string}{max_pull}'
         )
 
         small_step = max_displacement < tol and step_solved
-        if (i + 1) % decimate_every == 0 or small_step or i + 1 == max_iter:
+        # Without a positive merge length no edge can collapse, so a plateau gives
+        # adaptive decimation nothing to remove.
+        triggers = {
+            'adaptive': len(qualifying_ratios) >= 3 and min_edge_length > 0,
+            'small-step': small_step,
+            'final-iteration': i + 1 == max_iter,
+        }
+        if any(triggers.values()):
+            reasons = ', '.join(name for name, hit in triggers.items() if hit)
+            if triggers['adaptive']:
+                reasons += ' - Ratios: ' + ', '.join(
+                    f'{ratio:.5f}' for ratio in qualifying_ratios[-3:]
+                )
             X, adj, medialness = edge_collapse_decimation(
                 X, adj, min_edge_length, medialness=medialness, w_H_medial=w_H_medial
             )
@@ -483,6 +521,11 @@ def laplacian_graph_contraction(
                         f'Projected {decimated_count} escaped nodes after decimation '
                         'to foreground centres.'
                     )
+            print(
+                f'Decimation at iter {i + 1} [{reasons}] - Removed Nodes: '
+                f'{n_vertices - X.shape[0]} - Remaining Nodes: {X.shape[0]}'
+            )
+            previous_drift, qualifying_ratios = None, []
         stable_steps = stable_steps + 1 if small_step and len(X) == n_vertices else 0
         if stable_steps >= 3:
             print('Contraction geometry stable.')

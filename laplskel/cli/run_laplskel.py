@@ -160,11 +160,14 @@ def _get_parser():
         help='Maximum contraction movement in voxels, required for three stable steps.',
     )
     optional.add_argument(
-        '--decimate_every',
-        dest='decimate_every',
-        type=int,
-        default=1,
-        help='Decimate nodes every N steps [Default=1].',
+        '--decimate_ratio',
+        dest='decimate_ratio',
+        type=float,
+        default=0.93,
+        help=(
+            'Decimate once three consecutive mean-drift ratios (current/previous) '
+            'lie in [ratio, 1]; must be in (0, 1] [Default=0.93].'
+        ),
     )
     optional.add_argument(
         '--dec_grid_size',
