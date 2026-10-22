@@ -150,4 +150,5 @@ TEST_PLAN.md
 
 # test instances
 /tests/*
+/drafts/*
 /image/TEST_PLAN_0929/*
