@@ -43,3 +43,14 @@ through the CLI, workflow, and component dispatcher. Runtime work spans scheduli
 and algorithm internals, so agree on ownership before editing those internals.
 Preserve coordinate conventions, graph topology, return values, and numerical
 defaults across these boundaries.
+
+## Standard Workflow Output
+
+By default, the standard (non-`--alternating`) workflow runs contraction, including
+contraction-stage decimation controlled by `--decimate_ratio` and `--dec_grid_size`,
+then topology-preserving thinning and graph extraction. The exported graph keeps every
+digital skeleton voxel as a node, with straight edges between neighbouring voxel
+centres. Add `--second_fitting` to also smooth the extracted graph and simplify its
+branches within `--merge_tolerance`, as earlier versions always did. The NIfTI skeleton
+is the digital skeleton before fitting in both cases. `--second_fitting` has no effect
+with `--alternating`.

@@ -44,6 +44,7 @@ def laplacian_skeletonisation(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    second_fitting=False,
 ):
     """
     Load a NIfTI file volume image and perform geometric graph contraction skeletonisation.
@@ -121,7 +122,8 @@ def laplacian_skeletonisation(
     merge_tolerance : float, optional
         Maximum branch polyline error in voxel units during final refinement.
         Zero retains reference sampling. All values preserve foreground tunnels
-        under 26-connectivity. Default is 0.25.
+        under 26-connectivity. In the standard workflow it is used only with
+        second_fitting. Default is 0.25.
     alternating : bool, optional
         Use the experimental fixed-schedule contraction/thinning workflow. It uses
         the original physical EDT for ridge guidance, while the established workflow
@@ -139,11 +141,18 @@ def laplacian_skeletonisation(
         Also export the contracted graph before thinning as
         <output_stem>_intermediate.graphml beside the normal outputs.
         Ignored in alternating mode.
+    second_fitting : bool, optional
+        In the standard workflow, fit the extracted skeleton graph and then
+        simplify its branches with merge_tolerance. If False, the graph keeps
+        every digital skeleton voxel centre as a node. Ignored in alternating
+        mode. Default is False.
 
     Returns
     -------
     contracted_X : numpy.ndarray
         An (M, 3) matrix mapping the continuous 3D spatial points along the skeleton path.
+        Without second_fitting in the standard workflow, these are the digital
+        skeleton voxel centres.
     final_adj : scipy.sparse.csr_matrix
         The resulting graph sparse adjacency connectivity representation of shape (M, M).
     nifti_skel : numpy.ndarray
@@ -206,6 +215,7 @@ def laplacian_skeletonisation(
         contraction_steps,
         alter_init_thinning,
         dev_contra_graph,
+        second_fitting,
     )
 
     print('Reuniting results from parallel jobs.')

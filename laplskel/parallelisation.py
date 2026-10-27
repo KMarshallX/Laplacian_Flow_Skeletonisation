@@ -36,6 +36,7 @@ def _process_single_label(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    second_fitting=False,
 ):
     """
     Worker function to process a single connected component label.
@@ -99,6 +100,9 @@ def _process_single_label(
         Default False; ignored by the default workflow.
     dev_contra_graph : bool, optional
         Append pre-refinement coordinates and adjacency in the default workflow.
+    second_fitting : bool, optional
+        Fit and simplify the extracted graph in the default workflow. Ignored in
+        alternating mode, whose small components are always fitted. Default False.
 
     Returns
     -------
@@ -111,7 +115,8 @@ def _process_single_label(
     reference_voxels : numpy.ndarray
         Digital skeleton coordinates in the global volume.
     edge_paths : dict
-        Fitted edge polylines in global coordinates, before sampling reduction.
+        Edge polylines in global coordinates; fitted ones before sampling
+        reduction, or the two end nodes without second fitting.
     intermediate_X, intermediate_adj : numpy.ndarray, scipy.sparse.csr_matrix
         Appended only when dev_contra_graph is enabled in the default workflow.
         Global coordinates and adjacency before refinement; components with at
@@ -128,7 +133,7 @@ def _process_single_label(
     if len(X_init_local) <= 3 and (not alternating or alter_init_thinning):
         refined, adj_sparse, voxels, paths = refine_graph(
             cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True,
-            voxel_spacing=voxel_spacing
+            voxel_spacing=voxel_spacing, second_fitting=second_fitting or alternating
         )
         X_init_global = refined + np.array(offset_origin, dtype=np.float32)
         return (
@@ -187,7 +192,7 @@ def _process_single_label(
 
         label_X_local, label_adj, voxels, paths = refine_graph(
             cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True,
-            voxel_spacing=voxel_spacing
+            voxel_spacing=voxel_spacing, second_fitting=second_fitting
         )
     label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
 
@@ -228,6 +233,7 @@ def process_components(
     contraction_steps=5,
     alter_init_thinning=False,
     dev_contra_graph=False,
+    second_fitting=False,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -279,6 +285,7 @@ def process_components(
                 contraction_steps,
                 alter_init_thinning,
                 dev_contra_graph,
+                second_fitting,
             )
         )
 
