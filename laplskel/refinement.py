@@ -637,9 +637,8 @@ def refine_graph(
         Laplacian contraction result in the mask's voxel coordinate system.
         Guides which medial voxels survive; never determines tunnel removal.
     merge_tolerance : float, optional
-        Maximum polyline deviation in voxel units during degree-two merging.
-        Zero retains the reference sampling. No value permits tunnel removal.
-        Unused when second_fitting is False.
+        Retained for call compatibility and still validated; refinement no
+        longer merges degree-two nodes, so this value has no effect here.
     w_H_medial : float, optional
         Retained for call compatibility; final fitting uses uniform retention.
         This value no longer weights final fitting. Default is 1.
@@ -649,9 +648,9 @@ def refine_graph(
         Three positive physical voxel lengths used by final fitting.
         Defaults to (1, 1, 1); returned coordinates remain in voxel units.
     second_fitting : bool, optional
-        Fit degree-two nodes and then simplify branches. If False, keep every
-        extracted skeleton voxel centre as a node, joined by straight edges.
-        Default is True.
+        Fit degree-two node positions. Every extracted skeleton node is kept
+        either way, joined by straight edges; without fitting, nodes stay at
+        their voxel centres. Default is True.
 
     Returns
     -------
@@ -662,9 +661,8 @@ def refine_graph(
     reference_voxels : (K, 3) array, optional
         Topology-preserving digital skeleton, returned when return_paths is True.
     edge_paths : dict, optional
-        Original fitted polylines keyed by sorted node-index pairs, returned
-        when return_paths is True. Avoids topology changes from re-voxelization.
-        Without second fitting, each path holds only its two end nodes.
+        Straight edge paths keyed by sorted node-index pairs, returned when
+        return_paths is True; each path holds only its two end nodes.
     """
     if not np.isfinite(merge_tolerance) or merge_tolerance < 0:
         raise ValueError('merge_tolerance must be finite and >= 0.')
@@ -693,6 +691,7 @@ def refine_graph(
     reference_voxels = coordinates.astype(int)
     edges, tunnels = _tunnel_graph(coordinates)
     if second_fitting:
+        # Fitting moves degree-two nodes only; it never changes the edge set.
         coordinates, edges, diagnostics = _fit_frozen_graph(
             coordinates, edges, mask, voxel_spacing=voxel_spacing
         )
@@ -700,20 +699,13 @@ def refine_graph(
             f"Frozen fit: {diagnostics['status']}; lambda={diagnostics['lambda']:g}, "
             f"median physical edge={diagnostics['median_edge_length']:.6g}, "
             'uniform reference retention; '
-            f"residual={diagnostics['relative_residual']:.3g}; "
-            f"merge_tolerance={merge_tolerance:g} voxels."
+            f"residual={diagnostics['relative_residual']:.3g}."
         )
-        signature = branch_complex_signature(coordinates, edges)
-        coordinates, edges, paths = _simplify_paths(
-            coordinates, edges, mask, merge_tolerance
-        )
-        if branch_complex_signature(coordinates, edges) != signature:
-            raise RuntimeError('Refinement changed the extracted branch connectivity.')
     else:
-        # Keep the extracted voxel-centre graph; each edge is its own straight path.
-        edges = np.asarray(sorted(map(tuple, edges.tolist())), dtype=int).reshape(-1, 2)
-        paths = {(int(u), int(v)): coordinates[[u, v]] for u, v in edges}
-        print('Second fitting disabled; keeping every extracted skeleton node.')
+        print('Second fitting disabled; keeping voxel-centre node positions.')
+    # Keep every extracted skeleton node; each edge is its own straight path.
+    edges = np.asarray(sorted(map(tuple, edges.tolist())), dtype=int).reshape(-1, 2)
+    paths = {(int(u), int(v)): coordinates[[u, v]] for u, v in edges}
     for (u, v), path in paths.items():
         if (not np.array_equal(path[0], coordinates[u])
                 or not np.array_equal(path[-1], coordinates[v])):

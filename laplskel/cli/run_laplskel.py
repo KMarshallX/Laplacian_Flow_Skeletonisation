@@ -74,9 +74,9 @@ def _get_parser():
         '--second_fitting',
         action='store_true',
         help=(
-            'Fit the extracted skeleton graph and simplify its branches with '
-            '--merge_tolerance. By default the graph keeps every digital skeleton '
-            'voxel as a node. Ignored with --alternating.'
+            'Smooth the positions of the extracted skeleton graph nodes. The graph '
+            'keeps every digital skeleton voxel as a node either way; by default '
+            'nodes stay at voxel centres. Ignored with --alternating.'
         ),
     )
     optional.add_argument(
@@ -220,8 +220,8 @@ def _get_parser():
             'Maximum branch simplification error in voxels [Default=0.25]. '
             '0 retains reference sampling; every foreground tunnel is preserved '
             'at every setting using 26-connectivity. Higher values allow more aggressive simplification, '
-            'subject to foreground and topology constraints. Without --alternating, '
-            'used only with --second_fitting.'
+            'subject to foreground and topology constraints. Used only with '
+            '--alternating.'
         ),
     )
     optional.add_argument(

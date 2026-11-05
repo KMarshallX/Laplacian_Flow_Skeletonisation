@@ -133,8 +133,7 @@ def laplacian_skeletonisation(
     merge_tolerance : float, optional
         Maximum branch polyline error in voxel units during final refinement.
         Zero retains reference sampling. All values preserve foreground tunnels
-        under 26-connectivity. In the standard workflow it is used only with
-        second_fitting. Default is 0.25.
+        under 26-connectivity. Used only in alternating mode. Default is 0.25.
     alternating : bool, optional
         Use the experimental fixed-schedule contraction/thinning workflow. It uses
         the original physical EDT for ridge guidance, while the established workflow
@@ -153,9 +152,9 @@ def laplacian_skeletonisation(
         <output_stem>_intermediate.graphml beside the normal outputs.
         Ignored in alternating mode.
     second_fitting : bool, optional
-        In the standard workflow, fit the extracted skeleton graph and then
-        simplify its branches with merge_tolerance. If False, the graph keeps
-        every digital skeleton voxel centre as a node. Ignored in alternating
+        In the standard workflow, smooth the extracted skeleton graph's node
+        positions. The graph keeps every digital skeleton voxel as a node either
+        way; if False, nodes stay at voxel centres. Ignored in alternating
         mode. Default is False.
 
     Returns

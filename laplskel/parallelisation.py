@@ -104,8 +104,8 @@ def _process_single_label(
     dev_contra_graph : bool, optional
         Append pre-refinement coordinates and adjacency in the default workflow.
     second_fitting : bool, optional
-        Fit and simplify the extracted graph in the default workflow. Ignored in
-        alternating mode, whose small components are always fitted. Default False.
+        Fit the extracted graph's node positions in the default workflow. Ignored
+        in alternating mode, whose small components are always fitted. Default False.
     tol_mean_drift : float, optional
         Mean contraction displacement in voxels for three stable steps; zero
         disables it. Ignored in alternating mode. Default is 0.0025.
