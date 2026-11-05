@@ -163,10 +163,33 @@ def _get_parser():
         ),
     )
     optional.add_argument(
-        '--tol',
+        '--tol_max_drift',
         type=float,
         default=0.05,
-        help='Maximum contraction movement in voxels, required for three stable steps.',
+        help=(
+            'Stop contraction after three consecutive steps whose largest node '
+            'movement is below this value in voxels; also the small-step decimation '
+            'threshold. Ignored with --alternating [Default=0.05].'
+        ),
+    )
+    optional.add_argument(
+        '--tol_mean_drift',
+        type=float,
+        default=0.0025,
+        help=(
+            'Also stop contraction after three consecutive steps whose mean node '
+            'movement is below this value in voxels; 0 disables this test. Ignored '
+            'with --alternating [Default=0.0025].'
+        ),
+    )
+    optional.add_argument(
+        '--max_iter',
+        type=_positive_integer,
+        default=500,
+        help=(
+            'Maximum contraction iterations. Ignored with --alternating, which uses '
+            '--contraction_steps [Default=500].'
+        ),
     )
     optional.add_argument(
         '--decimate_ratio',

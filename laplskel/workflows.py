@@ -27,7 +27,9 @@ def laplacian_skeletonisation(
     w_L=0.5,
     w_H_base=0.5,
     w_H_medial=1.0,
-    tol=0.05,
+    tol_max_drift=0.05,
+    tol_mean_drift=0.0025,
+    max_iter=500,
     decimate_ratio=0.93,
     min_edge_length=0.01,
     downsample=False,
@@ -80,9 +82,18 @@ def laplacian_skeletonisation(
         centres, raised to the power of each node's medialness score. Holding medial
         nodes in place tightens the centreline onto the medial axis. A value of 1.0
         disables the boost. Default is 1.0.
-    tol : float, optional
-        Maximum contraction displacement in voxel units, required for three
-        consecutive steps without structural changes. Default is 0.05.
+    tol_max_drift : float, optional
+        Maximum contraction displacement in voxel units. Contraction stops after
+        three consecutive steps below it without structural changes; it is also
+        the small-step decimation threshold. Ignored in alternating mode.
+        Default is 0.05.
+    tol_mean_drift : float, optional
+        Mean contraction displacement in voxel units. Contraction also stops
+        after three consecutive steps below it without structural changes.
+        Zero disables this test. Ignored in alternating mode. Default is 0.0025.
+    max_iter : int, optional
+        Maximum contraction iterations. Ignored in alternating mode, which uses
+        contraction_steps. Default is 500.
     decimate_ratio : float, optional
         Adaptive decimation threshold in (0, 1]. Edge-collapse decimation runs once
         three consecutive mean-drift ratios (current / previous) lie in
@@ -167,6 +178,14 @@ def laplacian_skeletonisation(
         raise ValueError('merge_tolerance must be finite and >= 0.')
     if not np.isfinite(decimate_ratio) or not 0 < decimate_ratio <= 1:
         raise ValueError('decimate_ratio must be finite and in (0, 1].')
+    if not np.isfinite(tol_mean_drift) or tol_mean_drift < 0:
+        raise ValueError('tol_mean_drift must be finite and >= 0.')
+    if (
+        isinstance(max_iter, (bool, np.bool_))
+        or not isinstance(max_iter, (int, np.integer))
+        or max_iter < 1
+    ):
+        raise ValueError('max_iter must be a positive integer.')
     if alternating and (
         not isinstance(contraction_steps, int) or contraction_steps < 1
     ):
@@ -202,7 +221,7 @@ def laplacian_skeletonisation(
         w_L,
         w_H_base,
         w_H_medial,
-        tol,
+        tol_max_drift,
         init_graph_adj,
         local_pca_hops,
         decimate_ratio,
@@ -216,6 +235,8 @@ def laplacian_skeletonisation(
         alter_init_thinning,
         dev_contra_graph,
         second_fitting,
+        tol_mean_drift,
+        max_iter,
     )
 
     print('Reuniting results from parallel jobs.')

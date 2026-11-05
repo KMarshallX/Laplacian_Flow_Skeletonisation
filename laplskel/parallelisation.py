@@ -23,7 +23,7 @@ def _process_single_label(
     w_L,
     w_H_base,
     w_H_medial,
-    tol,
+    tol_max_drift,
     init_graph_adj,
     local_pca_hops,
     decimate_ratio,
@@ -37,6 +37,8 @@ def _process_single_label(
     alter_init_thinning=False,
     dev_contra_graph=False,
     second_fitting=False,
+    tol_mean_drift=0.0025,
+    max_iter=500,
 ):
     """
     Worker function to process a single connected component label.
@@ -68,8 +70,9 @@ def _process_single_label(
     w_H_medial : float
         Multiplicative retention boost applied to nodes at or around inscribed-sphere
         centres. A value of 1.0 disables the boost.
-    tol : float
-        Maximum contraction displacement in voxels for three stable steps.
+    tol_max_drift : float
+        Maximum contraction displacement in voxels for three stable steps; also
+        the small-step decimation threshold. Ignored in alternating mode.
     init_graph_adj : {6, 18, 26}, int
         Voxel-neighborhood connectivity used to construct the initial graph.
     local_pca_hops : int
@@ -103,6 +106,12 @@ def _process_single_label(
     second_fitting : bool, optional
         Fit and simplify the extracted graph in the default workflow. Ignored in
         alternating mode, whose small components are always fitted. Default False.
+    tol_mean_drift : float, optional
+        Mean contraction displacement in voxels for three stable steps; zero
+        disables it. Ignored in alternating mode. Default is 0.0025.
+    max_iter : int, optional
+        Maximum contraction iterations in the default workflow. Ignored in
+        alternating mode, which uses contraction_steps. Default is 500.
 
     Returns
     -------
@@ -155,7 +164,6 @@ def _process_single_label(
             w_L=w_L,
             w_H_base=w_H_base,
             w_H_medial=w_H_medial,
-            tol=tol,
             local_pca_hops=local_pca_hops,
             solver=solver,
             merge_tolerance=merge_tolerance,
@@ -177,7 +185,9 @@ def _process_single_label(
             w_L=w_L,
             w_H_base=w_H_base,
             w_H_medial=w_H_medial,
-            tol=tol,
+            tol=tol_max_drift,
+            tol_mean_drift=tol_mean_drift,
+            max_iter=max_iter,
             local_pca_hops=local_pca_hops,
             decimate_ratio=decimate_ratio,
             min_edge_length=min_edge_length,
@@ -220,7 +230,7 @@ def process_components(
     w_L,
     w_H_base,
     w_H_medial,
-    tol,
+    tol_max_drift,
     init_graph_adj,
     local_pca_hops,
     decimate_ratio,
@@ -234,6 +244,8 @@ def process_components(
     alter_init_thinning=False,
     dev_contra_graph=False,
     second_fitting=False,
+    tol_mean_drift=0.0025,
+    max_iter=500,
 ):
     """Process labeled segmentation components in parallel."""
     total_cores = os.cpu_count() or 1
@@ -272,7 +284,7 @@ def process_components(
                 w_L,
                 w_H_base,
                 w_H_medial,
-                tol,
+                tol_max_drift,
                 init_graph_adj,
                 local_pca_hops,
                 decimate_ratio,
@@ -286,6 +298,8 @@ def process_components(
                 alter_init_thinning,
                 dev_contra_graph,
                 second_fitting,
+                tol_mean_drift,
+                max_iter,
             )
         )
 
