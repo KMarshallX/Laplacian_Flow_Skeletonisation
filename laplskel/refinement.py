@@ -19,11 +19,13 @@ from scipy import ndimage, sparse
 from scipy.spatial import cKDTree
 from scipy.sparse.linalg import splu
 
+from .contraction import laplacian_graph_contraction
 from .graph import compute_sparse_adjacency_matrix
 from .objects import UnionFind
 from .utils import (
     _edge_voxels,
     _foreground_voxel,
+    _nonincident_intersection_pairs,
     _nonincident_intersections,
     _valid_node_move,
 )
@@ -567,6 +569,132 @@ def _fit_frozen_graph(
     return output, edges, diagnostics
 
 
+def _edges_leaving_foreground(coordinates, edges, mask):
+    """Flag edges whose straight segment leaves the closed foreground voxel cubes."""
+    edges = np.asarray(edges, dtype=int).reshape(-1, 2)
+    start, end = coordinates[edges[:, 0]], coordinates[edges[:, 1]]
+    # Fast certificate: every voxel of the box covering the segment is foreground.
+    lower = np.ceil(np.minimum(start, end) - 0.5 - 1e-10).astype(int)
+    upper = np.floor(np.maximum(start, end) + 0.5 + 1e-10).astype(int)
+    small = np.all(upper - lower <= 2, axis=1)
+    certified = small & np.all(lower >= 0, axis=1) & np.all(
+        upper < np.asarray(mask.shape), axis=1
+    )
+    for offset in product(range(3), repeat=3):
+        voxel = lower + np.asarray(offset)
+        inside_box = np.all(voxel <= upper, axis=1) & certified
+        clipped = np.clip(voxel, 0, np.asarray(mask.shape) - 1)
+        certified &= ~inside_box | mask[tuple(clipped.T)]
+    leaving = np.zeros(len(edges), dtype=bool)
+    for index in np.flatnonzero(~certified):
+        try:
+            _edge_voxels(start[index], end[index], mask.shape, mask)
+        except ValueError:
+            leaving[index] = True
+    return leaving
+
+
+_PIN_WEIGHT = 1e3
+# Retention weights of the second fit, tuned on synthetic trees F01-F12 (odd cases for
+# tuning, even cases held out) against the generating centreline; see
+# tests/test_output/flow_fitting_20261106/run_20261106_161705/RESULTS.md. Contraction
+# keeps its own w_H and medial boost; every other flow setting is shared with it.
+_FIT_W_H_BASE = 0.16
+_FIT_W_H_MEDIAL = 3.0
+
+
+def _repair_step(previous, proposed, edges, mask):
+    """Return nodes to their previous positions until no edge leaves or crosses.
+
+    Both ends of every offending edge go back, repeatedly. A valid previous state
+    guarantees termination, since reverting everything restores it.
+    """
+    accepted = np.array(proposed, dtype=float)
+    reverted = np.zeros(len(accepted), dtype=bool)
+    check = np.arange(len(edges))
+    while True:
+        bad = check[_edges_leaving_foreground(accepted, edges[check], mask)]
+        if not len(bad):
+            crossing = {index for pair in _nonincident_intersection_pairs(
+                accepted, edges, np.ones(3)) for index in pair}
+            if not crossing:
+                break
+            bad = np.fromiter(crossing, dtype=int)
+        nodes = np.unique(edges[bad])
+        fresh = nodes[~reverted[nodes]]
+        if not len(fresh):
+            raise RuntimeError('Flow fitting could not restore a valid step.')
+        accepted[fresh] = previous[fresh]
+        reverted[fresh] = True
+        # Only edges touching a reverted node changed since the last in-mask check.
+        check = np.flatnonzero(np.any(np.isin(edges, fresh), axis=1))
+    return accepted, int(reverted.sum())
+
+
+def _flow_fit_graph(coordinates, edges, mask, flow_settings=None, pin_weight=_PIN_WEIGHT):
+    """Smooth an extracted graph with the contraction flow, keeping its edges.
+
+    Runs the Laplacian contraction on the graph with containment on and merging
+    off. Endpoints and junctions keep their positions through a very large
+    retention weight; the direct LU solver is always used because CG does not
+    converge with weights this large. After each step, both ends of any edge leaving the
+    foreground, or crossing another edge, return to their previous accepted positions,
+    repeatedly, so every accepted step keeps all nodes and edges inside the
+    foreground cubes and free of crossings.
+    Returns voxel coordinates, unchanged edges, and diagnostics.
+    """
+    reference = np.asarray(coordinates, dtype=float).copy()
+    edges = np.asarray(edges, dtype=int).reshape(-1, 2).copy()
+    mask = np.asarray(mask, dtype=bool)
+    settings = dict(flow_settings or {})
+    forced = {'enforce_containment', 'min_edge_length', 'provisional',
+              'anchor_scale', 'step_repair', 'binary_segmentation', 'solver'}
+    if forced & set(settings):
+        raise ValueError(f'flow_settings cannot set {sorted(forced & set(settings))}.')
+    if not np.isfinite(pin_weight) or pin_weight < 1:
+        raise ValueError('pin_weight must be finite and >= 1.')
+    diagnostics = {'steps': 0, 'repaired_nodes': 0, 'max_pinned_drift': 0.,
+                   'pin_weight': float(pin_weight)}
+    degree = np.bincount(edges.ravel(), minlength=len(reference))
+    if not len(edges) or not np.any(degree == 2):
+        return reference, edges, diagnostics
+    if _nonincident_intersections(reference, edges, np.ones(3)):
+        raise ValueError('Initial graph contains an unintended intersection.')
+    if np.any(_edges_leaving_foreground(reference, edges, mask)):
+        raise ValueError('Initial graph leaves the foreground mask.')
+    n_vertices = len(reference)
+    adjacency = sparse.csr_matrix(
+        (np.ones(2 * len(edges), dtype=bool),
+         (np.r_[edges[:, 0], edges[:, 1]], np.r_[edges[:, 1], edges[:, 0]])),
+        shape=(n_vertices, n_vertices),
+    )
+    anchor_scale = np.where(degree == 2, 1., float(pin_weight))
+
+    def repair(previous, proposed):
+        accepted, count = _repair_step(previous, proposed, edges, mask)
+        diagnostics['steps'] += 1
+        diagnostics['repaired_nodes'] += count
+        return accepted, count
+
+    output, output_adjacency = laplacian_graph_contraction(
+        reference, adjacency, binary_segmentation=mask, enforce_containment=True,
+        min_edge_length=0., provisional=True, anchor_scale=anchor_scale,
+        step_repair=repair, solver='LU', **settings,
+    )
+    if len(output) != n_vertices or (output_adjacency != adjacency).nnz:
+        raise RuntimeError('Flow fitting changed the graph structure.')
+    if np.any(_edges_leaving_foreground(output, edges, mask)):
+        raise RuntimeError('Flow fitting left the foreground mask.')
+    if _nonincident_intersections(output, edges, np.ones(3)):
+        raise RuntimeError('Flow fitting introduced an intersection.')
+    pinned = degree != 2
+    if np.any(pinned):
+        diagnostics['max_pinned_drift'] = float(
+            np.max(np.linalg.norm(output[pinned] - reference[pinned], axis=1))
+        )
+    return output, edges, diagnostics
+
+
 def _simplify_paths(coordinates, edges, mask, tolerance):
     """Remove degree-two vertices; mask=None skips foreground shortcut checks."""
     neighbours = [set() for _ in coordinates]
@@ -626,6 +754,7 @@ def refine_graph(
     *,
     voxel_spacing=(1., 1., 1.),
     second_fitting=True,
+    flow_settings=None,
 ):
     """Extract a graph with every foreground tunnel and optionally fit its geometry.
 
@@ -640,17 +769,23 @@ def refine_graph(
         Retained for call compatibility and still validated; refinement no
         longer merges degree-two nodes, so this value has no effect here.
     w_H_medial : float, optional
-        Retained for call compatibility; final fitting uses uniform retention.
-        This value no longer weights final fitting. Default is 1.
+        Retained for call compatibility; still validated. The fit takes its
+        medial boost from flow_settings instead. Default is 1.
     return_paths : bool, optional
         Also return reference voxels and the retained edge polylines for export.
     voxel_spacing : tuple of float, optional
-        Three positive physical voxel lengths used by final fitting.
-        Defaults to (1, 1, 1); returned coordinates remain in voxel units.
+        Retained for call compatibility; the flow fit works in voxel units, as
+        contraction does. Returned coordinates are in voxel units.
     second_fitting : bool, optional
-        Fit degree-two node positions. Every extracted skeleton node is kept
-        either way, joined by straight edges; without fitting, nodes stay at
-        their voxel centres. Default is True.
+        Smooth degree-two node positions with the contraction flow; endpoints
+        and junctions are held by a very large retention weight. Every extracted
+        skeleton node is kept either way, joined by straight edges; without
+        fitting, nodes stay at their voxel centres. Default is True.
+    flow_settings : dict, optional
+        Contraction keyword arguments for the fit, e.g. w_L, w_H_base,
+        w_H_medial, beta_edt, use_edt, use_anisotropic, tol, tol_mean_drift,
+        max_iter and local_pca_hops. Containment is always on, merging always
+        off and the solver always LU. Unset values use the contraction defaults.
 
     Returns
     -------
@@ -691,15 +826,15 @@ def refine_graph(
     reference_voxels = coordinates.astype(int)
     edges, tunnels = _tunnel_graph(coordinates)
     if second_fitting:
-        # Fitting moves degree-two nodes only; it never changes the edge set.
-        coordinates, edges, diagnostics = _fit_frozen_graph(
-            coordinates, edges, mask, voxel_spacing=voxel_spacing
+        # Fitting moves node positions only; it never changes the edge set.
+        coordinates, edges, diagnostics = _flow_fit_graph(
+            coordinates, edges, mask, flow_settings
         )
         print(
-            f"Frozen fit: {diagnostics['status']}; lambda={diagnostics['lambda']:g}, "
-            f"median physical edge={diagnostics['median_edge_length']:.6g}, "
-            'uniform reference retention; '
-            f"residual={diagnostics['relative_residual']:.3g}."
+            f"Flow fit: {diagnostics['steps']} steps; "
+            f"{diagnostics['repaired_nodes']} node moves repaired; "
+            f"pin weight {diagnostics['pin_weight']:g}, max endpoint/junction "
+            f"drift {diagnostics['max_pinned_drift']:.3g} voxels."
         )
     else:
         print('Second fitting disabled; keeping voxel-centre node positions.')

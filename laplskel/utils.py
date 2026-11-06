@@ -193,11 +193,16 @@ def _sweep_contained(old_start, old_end, new_start, new_end, mask):
 
 def _nonincident_intersections(coordinates, edges, spacing):
     """Detect unrepresented crossings and overlap beyond shared endpoints."""
+    return next(_nonincident_intersection_pairs(coordinates, edges, spacing), None) is not None
+
+
+def _nonincident_intersection_pairs(coordinates, edges, spacing):
+    """Yield every (index, other_index) edge pair that crosses or folds back."""
     physical = np.asarray(coordinates, dtype=float) * spacing
     edges = np.asarray(edges, dtype=int).reshape(-1, 2)
     tolerance = 1e-8 * float(np.min(spacing))
     if not len(edges):
-        return False
+        return
     midpoints = np.mean(physical[edges], axis=1)
     radii = 0.5 * np.linalg.norm(physical[edges[:, 0]] - physical[edges[:, 1]], axis=1)
     tree = cKDTree(midpoints)
@@ -223,7 +228,7 @@ def _nonincident_intersections(coordinates, edges, spacing):
                             np.linalg.norm(first), np.linalg.norm(second)
                         )
                     ):
-                        return True
+                        yield index, other_index
                 continue
             r, s = physical[[a, b]]
             if np.any(np.maximum(np.minimum(p, q), np.minimum(r, s)) >
@@ -256,8 +261,7 @@ def _nonincident_intersections(coordinates, edges, spacing):
                 endpoint_distance(r, p, q),
                 endpoint_distance(s, p, q),
             ) <= tolerance:
-                return True
-    return False
+                yield index, other_index
 
 
 def _segment_contacts(start, end, first, second, tolerance):

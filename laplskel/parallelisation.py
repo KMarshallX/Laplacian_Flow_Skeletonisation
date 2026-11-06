@@ -9,7 +9,7 @@ from tqdm_joblib import ParallelPbar
 from .alternating import alternating_graph_skeletonisation
 from .contraction import laplacian_graph_contraction
 from .graph import compute_sparse_adjacency_matrix
-from .refinement import refine_graph
+from .refinement import _FIT_W_H_BASE, _FIT_W_H_MEDIAL, refine_graph
 
 
 def _process_single_label(
@@ -104,8 +104,10 @@ def _process_single_label(
     dev_contra_graph : bool, optional
         Append pre-refinement coordinates and adjacency in the default workflow.
     second_fitting : bool, optional
-        Fit the extracted graph's node positions in the default workflow. Ignored
-        in alternating mode, whose small components are always fitted. Default False.
+        Smooth the extracted graph's node positions with the contraction flow in
+        the default workflow. It shares the contraction settings above except the
+        retention weights (w_H 0.16, medial boost 3, tuned for fitting). Ignored in
+        alternating mode, whose small components are always fitted. Default False.
     tol_mean_drift : float, optional
         Mean contraction displacement in voxels for three stable steps; zero
         disables it. Ignored in alternating mode. Default is 0.0025.
@@ -133,6 +135,14 @@ def _process_single_label(
     """
     X_init_local = np.argwhere(cropped_label).astype(np.uint16)
     intermediate = ()
+    # Second fitting reuses the contraction objective and stopping settings, with
+    # its own tuned retention weights.
+    flow_settings = dict(
+        use_edt=use_edt, use_anisotropic=use_anisotropic, beta_edt=beta_edt,
+        w_L=w_L, w_H_base=_FIT_W_H_BASE, w_H_medial=_FIT_W_H_MEDIAL,
+        tol=tol_max_drift, tol_mean_drift=tol_mean_drift, max_iter=max_iter,
+        local_pca_hops=local_pca_hops,
+    )
     if dev_contra_graph and not alternating and len(X_init_local) <= 3:
         intermediate = (
             X_init_local + np.array(offset_origin, dtype=np.float32),
@@ -142,7 +152,8 @@ def _process_single_label(
     if len(X_init_local) <= 3 and (not alternating or alter_init_thinning):
         refined, adj_sparse, voxels, paths = refine_graph(
             cropped_label, X_init_local, merge_tolerance, w_H_medial, return_paths=True,
-            voxel_spacing=voxel_spacing, second_fitting=second_fitting or alternating
+            voxel_spacing=voxel_spacing, second_fitting=second_fitting or alternating,
+            flow_settings=flow_settings,
         )
         X_init_global = refined + np.array(offset_origin, dtype=np.float32)
         return (
@@ -202,7 +213,8 @@ def _process_single_label(
 
         label_X_local, label_adj, voxels, paths = refine_graph(
             cropped_label, label_X_local, merge_tolerance, w_H_medial, return_paths=True,
-            voxel_spacing=voxel_spacing, second_fitting=second_fitting
+            voxel_spacing=voxel_spacing, second_fitting=second_fitting,
+            flow_settings=flow_settings,
         )
     label_X_global = label_X_local + np.array(offset_origin, dtype=np.float32)
 

@@ -51,6 +51,8 @@ contraction-stage decimation controlled by `--decimate_ratio` and `--dec_grid_si
 then topology-preserving thinning and graph extraction. The exported graph keeps every
 digital skeleton voxel as a node, with straight edges between neighbouring voxel
 centres. Add `--second_fitting` to also smooth the node positions of the extracted
-graph; every skeleton voxel still stays a node. The NIfTI skeleton
-is the digital skeleton before fitting in both cases. `--second_fitting` has no effect
-with `--alternating`.
+graph with the contraction flow, holding endpoints and junctions in place. The fit
+shares the contraction settings except its own retention weights (w_H 0.16, medial
+boost 3), tuned on the synthetic trees; every skeleton voxel still stays a node. The
+NIfTI skeleton is the digital skeleton before fitting in both cases. `--second_fitting`
+has no effect with `--alternating`.

@@ -153,9 +153,11 @@ def laplacian_skeletonisation(
         Ignored in alternating mode.
     second_fitting : bool, optional
         In the standard workflow, smooth the extracted skeleton graph's node
-        positions. The graph keeps every digital skeleton voxel as a node either
-        way; if False, nodes stay at voxel centres. Ignored in alternating
-        mode. Default is False.
+        positions with the contraction flow, holding endpoints and junctions in
+        place. It shares the contraction settings except its own tuned retention
+        weights (w_H 0.16, medial boost 3). The graph keeps every digital
+        skeleton voxel as a node either way; if False, nodes stay at voxel
+        centres. Ignored in alternating mode. Default is False.
 
     Returns
     -------

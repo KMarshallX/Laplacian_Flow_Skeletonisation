@@ -74,9 +74,12 @@ def _get_parser():
         '--second_fitting',
         action='store_true',
         help=(
-            'Smooth the positions of the extracted skeleton graph nodes. The graph '
-            'keeps every digital skeleton voxel as a node either way; by default '
-            'nodes stay at voxel centres. Ignored with --alternating.'
+            'Smooth the positions of the extracted skeleton graph nodes with the '
+            'contraction flow, holding endpoints and junctions in place. It shares the '
+            'contraction settings except its own tuned retention weights (w_H 0.16, '
+            'medial boost 3). The graph keeps every digital skeleton voxel as a node '
+            'either way; by default nodes stay at voxel centres. Ignored with '
+            '--alternating.'
         ),
     )
     optional.add_argument(

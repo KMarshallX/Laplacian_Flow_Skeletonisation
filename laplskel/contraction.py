@@ -176,6 +176,8 @@ def laplacian_graph_contraction(
     local_pca_hops=1,
     solver='CG',
     provisional=False,
+    anchor_scale=None,
+    step_repair=None,
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -259,6 +261,15 @@ def laplacian_graph_contraction(
         If True, treat ``max_iter`` as an intentional bounded contraction stage and
         do not warn when that stage ends before geometric convergence. Default is
         False. This does not change the numerical update or convergence test.
+    anchor_scale : numpy.ndarray, optional
+        An (N,) array of positive factors multiplying each node's retention weight,
+        stacked on the baseline, EDT and medial weights. Requires a nonpositive
+        `min_edge_length`, so node indices never change. Default is None.
+    step_repair : callable, optional
+        Called as ``step_repair(previous, proposed)`` after containment projection
+        in every step; returns the accepted (N, 3) coordinates and the number of
+        nodes it changed. Drift is measured after it. Requires a nonpositive
+        `min_edge_length`. Default is None.
 
     Returns
     -------
@@ -283,6 +294,13 @@ def laplacian_graph_contraction(
         raise ValueError('decimate_ratio must be finite and in (0, 1].')
     if not np.isfinite(tol_mean_drift) or tol_mean_drift < 0:
         raise ValueError('tol_mean_drift must be finite and >= 0.')
+    if (anchor_scale is not None or step_repair is not None) and min_edge_length > 0:
+        raise ValueError('anchor_scale and step_repair require min_edge_length <= 0.')
+    if anchor_scale is not None:
+        anchor_scale = np.asarray(anchor_scale, dtype=float)
+        if (anchor_scale.shape != (len(X_init),) or not np.all(np.isfinite(anchor_scale))
+                or np.any(anchor_scale <= 0)):
+            raise ValueError('anchor_scale must hold one positive finite value per node.')
 
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
@@ -372,6 +390,9 @@ def laplacian_graph_contraction(
             # Raising the boost to the medialness score leaves boundary nodes at their
             # baseline weight while holding inscribed-sphere centres in place.
             w_H_per_node = w_H_per_node * (w_H_medial**medialness)
+
+        if anchor_scale is not None:
+            w_H_per_node = w_H_per_node * anchor_scale
 
         W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
 
@@ -481,6 +502,11 @@ def laplacian_graph_contraction(
             X_next, escaped_count = _project_escaped_nodes(X_next, foreground_tree)
             if escaped_count:
                 max_pull += f' [Projected: {escaped_count} escaped nodes to centres]'
+
+        if step_repair is not None:
+            X_next, repaired_count = step_repair(X, X_next)
+            if repaired_count:
+                max_pull += f' [Repaired: {repaired_count} nodes]'
 
         movements = np.linalg.norm(X_next - X, axis=1)
         displacement = np.mean(movements)
