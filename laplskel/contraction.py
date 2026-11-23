@@ -168,6 +168,7 @@ def laplacian_graph_contraction(
     delta=0.5,
     max_iter=2000,
     tol=0.05,
+    tol_mean_drift=0.0,
     decimate_ratio=0.93,
     min_edge_length=0.01,
     alpha_norm=1.5,
@@ -175,6 +176,8 @@ def laplacian_graph_contraction(
     local_pca_hops=1,
     solver='CG',
     provisional=False,
+    anchor_scale=None,
+    step_repair=None,
 ):
     """
     Carry out Laplacian Flow Dynamics.
@@ -220,8 +223,15 @@ def laplacian_graph_contraction(
     max_iter : int, optional
         Maximum allowed iteration steps for the contraction flow solver. Default is 2000.
     tol : float, optional
-        Maximum vertex displacement tolerance in voxel units. Three stable steps
-        without structural changes are required. Default is 0.05.
+        Maximum vertex displacement tolerance in voxel units. Contraction stops
+        after three consecutive solved steps whose largest displacement is below
+        it without structural changes. Also the small-step decimation threshold.
+        Default is 0.05.
+    tol_mean_drift : float, optional
+        Mean vertex displacement tolerance in voxel units. Contraction also stops
+        after three consecutive solved steps whose mean drift is below it without
+        structural changes. Drift is measured after containment projection.
+        Zero disables this test. Default is 0.0.
     decimate_ratio : float, optional
         Adaptive decimation threshold in (0, 1]. Drift is the mean node displacement
         after containment projection. Edge-collapse decimation runs once three
@@ -251,6 +261,15 @@ def laplacian_graph_contraction(
         If True, treat ``max_iter`` as an intentional bounded contraction stage and
         do not warn when that stage ends before geometric convergence. Default is
         False. This does not change the numerical update or convergence test.
+    anchor_scale : numpy.ndarray, optional
+        An (N,) array of positive factors multiplying each node's retention weight,
+        stacked on the baseline, EDT and medial weights. Requires a nonpositive
+        `min_edge_length`, so node indices never change. Default is None.
+    step_repair : callable, optional
+        Called as ``step_repair(previous, proposed)`` after containment projection
+        in every step; returns the accepted (N, 3) coordinates and the number of
+        nodes it changed. Drift is measured after it. Requires a nonpositive
+        `min_edge_length`. Default is None.
 
     Returns
     -------
@@ -262,7 +281,8 @@ def laplacian_graph_contraction(
     Raises
     ------
     ValueError
-        If `w_H_medial` is smaller than 1.0 or `decimate_ratio` is outside (0, 1].
+        If `w_H_medial` is smaller than 1.0, `decimate_ratio` is outside (0, 1],
+        or `tol_mean_drift` is negative or non-finite.
     """
     if not np.isfinite(w_H_medial) or w_H_medial < 1.0:
         raise ValueError('w_H_medial must be finite and >= 1.0.')
@@ -272,6 +292,15 @@ def laplacian_graph_contraction(
         raise ValueError('max_iter must be positive.')
     if not np.isfinite(decimate_ratio) or not 0 < decimate_ratio <= 1:
         raise ValueError('decimate_ratio must be finite and in (0, 1].')
+    if not np.isfinite(tol_mean_drift) or tol_mean_drift < 0:
+        raise ValueError('tol_mean_drift must be finite and >= 0.')
+    if (anchor_scale is not None or step_repair is not None) and min_edge_length > 0:
+        raise ValueError('anchor_scale and step_repair require min_edge_length <= 0.')
+    if anchor_scale is not None:
+        anchor_scale = np.asarray(anchor_scale, dtype=float)
+        if (anchor_scale.shape != (len(X_init),) or not np.all(np.isfinite(anchor_scale))
+                or np.any(anchor_scale <= 0)):
+            raise ValueError('anchor_scale must hold one positive finite value per node.')
 
     X = X_init.copy().astype(float)
     adj = adj_init.copy()
@@ -311,7 +340,8 @@ def laplacian_graph_contraction(
     print(
         f'Starting contraction with {X.shape[0]} nodes \n\n'
         f'Params:\n'
-        f' - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},\n'
+        f' - w_L (\u03b1)={w_L}, w_H_base (\u03b2)={w_H_base}, tol (\u03b3)={tol},'
+        f' tol_mean_drift={tol_mean_drift}, max_iter={max_iter},\n'
         f' -{edt_string} min_edge_length (collapse threshold)={min_edge_length}\n\n'
         f'Options:\n'
         f' - Anisotropic={use_anisotropic}\n'
@@ -322,6 +352,7 @@ def laplacian_graph_contraction(
     )
 
     stable_steps = 0
+    mean_stable_steps = 0
     previous_drift = None
     qualifying_ratios = []
     for i in range(max_iter):
@@ -359,6 +390,9 @@ def laplacian_graph_contraction(
             # Raising the boost to the medialness score leaves boundary nodes at their
             # baseline weight while holding inscribed-sphere centres in place.
             w_H_per_node = w_H_per_node * (w_H_medial**medialness)
+
+        if anchor_scale is not None:
+            w_H_per_node = w_H_per_node * anchor_scale
 
         W_H_sq = sparse.diags(w_H_per_node**2, format='csr')
 
@@ -469,6 +503,11 @@ def laplacian_graph_contraction(
             if escaped_count:
                 max_pull += f' [Projected: {escaped_count} escaped nodes to centres]'
 
+        if step_repair is not None:
+            X_next, repaired_count = step_repair(X, X_next)
+            if repaired_count:
+                max_pull += f' [Repaired: {repaired_count} nodes]'
+
         movements = np.linalg.norm(X_next - X, axis=1)
         displacement = np.mean(movements)
         max_displacement = np.max(movements)
@@ -526,9 +565,19 @@ def laplacian_graph_contraction(
                 f'{n_vertices - X.shape[0]} - Remaining Nodes: {X.shape[0]}'
             )
             previous_drift, qualifying_ratios = None, []
-        stable_steps = stable_steps + 1 if small_step and len(X) == n_vertices else 0
-        if stable_steps >= 3:
-            print('Contraction geometry stable.')
+        unchanged = len(X) == n_vertices
+        stable_steps = stable_steps + 1 if small_step and unchanged else 0
+        # A few snapped or sliding nodes can hold the maximum above tol long after
+        # the bulk has settled, so a low mean drift is an alternative stop.
+        small_mean = displacement < tol_mean_drift and step_solved
+        mean_stable_steps = mean_stable_steps + 1 if small_mean and unchanged else 0
+        if stable_steps >= 3 or mean_stable_steps >= 3:
+            criteria = []
+            if stable_steps >= 3:
+                criteria.append(f'max drift < {tol}')
+            if mean_stable_steps >= 3:
+                criteria.append(f'mean drift < {tol_mean_drift}')
+            print(f'Contraction geometry stable. [{", ".join(criteria)}]')
             break
     else:
         if provisional:

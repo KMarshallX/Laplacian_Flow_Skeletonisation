@@ -3,10 +3,30 @@
 import argparse
 import sys
 
-from laplskel.workflows import laplacian_skeletonisation
+from laplskel.refinement import DEFAULT_FIT_W_H, DEFAULT_FIT_W_H_MEDIAL
+from laplskel.workflows import _graph_files, _nifti_output, laplacian_skeletonisation
 
 VALID_CONNECTIVITY = (6, 18, 26)
 VALID_SOLVER = ('LU', 'CG', 'AMGCG')
+
+
+def _nifti_path(value):
+    """Parse the skeleton NIfTI output path (.nii or .nii.gz)."""
+    try:
+        return _nifti_output(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _graph_path(option):
+    """Return a parser for a graph output path (.graphml or .npz)."""
+    def parse(value):
+        try:
+            _graph_files(value, option)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+        return value
+    return parse
 
 
 def _positive_integer(value):
@@ -43,89 +63,68 @@ def _get_parser():
         required=True,
         help='Path pointing toward the input .nii or .nii.gz file volume.',
     )
-
-    optional = parser.add_argument_group('Other Optional Arguments')
-    optional.add_argument(
+    required.add_argument(
         '--output',
         '-o',
         dest='out_path',
-        type=str,
-        default=None,
-        help='Path destination for the generated skeleton arrays.',
-    )
-    optional.add_argument(
-        '--graphml',
-        action='store_true',
-        default=argparse.SUPPRESS,
+        type=_nifti_path,
+        required=True,
         help=(
-            'Write the converged graph as GraphML instead of coordinate and '
-            'adjacency NPZ files.'
+            'Output skeleton NIfTI path, absolute or relative, ending in .nii.gz or '
+            '.nii (e.g. ./results/case01/skeleton.nii.gz). Missing folders are created.'
+        ),
+    )
+
+    optional = parser.add_argument_group('Other Optional Arguments')
+    optional.add_argument(
+        '--graph_output',
+        type=_graph_path('--graph_output'),
+        default=None,
+        help=(
+            'Also write the skeleton graph to this path, absolute or relative. The '
+            'ending selects the format: .graphml for GraphML, or .npz for the sparse '
+            'adjacency with coordinates and edge paths in <stem>_coords.npz beside it. '
+            'Missing folders are created. Without it only the NIfTI is written.'
         ),
     )
     optional.add_argument(
-        '--dev_contra_graph',
-        action='store_true',
+        '--graph_original',
+        type=_graph_path('--graph_original'),
+        default=None,
         help=(
-            'Also write the contracted graph before thinning as '
-            '<output_stem>_intermediate.graphml. Ignored with --alternating.'
+            'Also write the contracted graph before thinning to this path, with the '
+            'same format rules as --graph_output.'
         ),
     )
     optional.add_argument(
         '--second_fitting',
         action='store_true',
         help=(
-            'Fit the extracted skeleton graph and simplify its branches with '
-            '--merge_tolerance. By default the graph keeps every digital skeleton '
-            'voxel as a node. Ignored with --alternating.'
+            'Smooth the positions of the extracted skeleton graph nodes with the '
+            'contraction flow, holding endpoints and junctions in place. It shares the '
+            'contraction settings except its own retention weights (--fit_w_H, '
+            '--fit_w_H_medial). The graph keeps every digital skeleton voxel as a node '
+            'either way; by default nodes stay at voxel centres.'
         ),
     )
     optional.add_argument(
-        '--alternating',
-        action='store_true',
+        '--fit_w_H',
+        dest='fit_w_H',
+        type=float,
+        default=argparse.SUPPRESS,
         help=(
-            'Use the experimental fixed-schedule contraction/thinning workflow '
-            'with original-foreground EDT ridge guidance.'
+            'Baseline retention weight of the second fit. Requires --second_fitting '
+            f'[Default={DEFAULT_FIT_W_H}].'
         ),
     )
     optional.add_argument(
-        '--alter_init_thinning',
-        action='store_true',
+        '--fit_w_H_medial',
+        dest='fit_w_H_medial',
+        type=float,
+        default=argparse.SUPPRESS,
         help=(
-            'With --alternating, build an initial branch reference and enable '
-            'reference preservation, critical-node movement caps and containment. '
-            'Without this flag, use default thinning rules and free graph fitting.'
-        ),
-    )
-    optional.add_argument(
-        '--contraction_steps',
-        type=_positive_integer,
-        default=5,
-        help='Maximum contraction iterations per --alternating cycle [Default=5].',
-    )
-    optional.add_argument(
-        '--use_edt',
-        action='store_true',
-        help=(
-            'Use distance transform potential constraints on top of classic uniform '
-            'retention mapping.'
-        ),
-    )
-    optional.add_argument(
-        '--use_anisotropic',
-        action='store_true',
-        help=(
-            'Flag to enable Laplacian weighting, '
-            'favoring cross-sectional contraction while reducing longitudinal contraction.'
-            'Omitting this flag will disable anisotropic constraints and fall back to standard '
-            'isotropic Laplacian matrix operations.'
-        ),
-    )
-    optional.add_argument(
-        '--enforce_containment',
-        action='store_true',
-        help=(
-            'Snap nodes outside continuous foreground voxel cubes to the nearest '
-            'foreground voxel centre before and during contraction.'
+            'Medial retention boost of the second fit; 1.0 disables it. Requires '
+            f'--second_fitting [Default={DEFAULT_FIT_W_H_MEDIAL:g}].'
         ),
     )
     optional.add_argument(
@@ -154,19 +153,40 @@ def _get_parser():
         '--w_H_medial',
         dest='w_H_medial',
         type=float,
-        default=1.0,
+        default=20.0,
         help=(
-            'Retention weight boost applied to nodes at or around inscribed-sphere '
-            'centres, tightening the centreline onto the medial axis. Raised to the '
-            'power of each node medialness score, so boundary nodes keep their '
-            'baseline weight. 1.0 disables the boost [Default=1.0].'
+            'Contraction retention weight boost applied to nodes at or around '
+            'inscribed-sphere centres, tightening the centreline onto the medial axis. '
+            'Raised to the power of each node medialness score, so boundary nodes keep '
+            'their baseline weight. 1.0 disables the boost. The second fit uses '
+            '--fit_w_H_medial instead [Default=20].'
         ),
     )
     optional.add_argument(
-        '--tol',
+        '--tol_max_drift',
         type=float,
         default=0.05,
-        help='Maximum contraction movement in voxels, required for three stable steps.',
+        help=(
+            'Stop contraction (and the second fit) after three consecutive steps whose '
+            'largest node movement is below this value in voxels; also the small-step '
+            'decimation threshold [Default=0.05].'
+        ),
+    )
+    optional.add_argument(
+        '--tol_mean_drift',
+        type=float,
+        default=0.0025,
+        help=(
+            'Also stop contraction (and the second fit) after three consecutive steps '
+            'whose mean node movement is below this value in voxels; 0 disables this '
+            'test [Default=0.0025].'
+        ),
+    )
+    optional.add_argument(
+        '--max_iter',
+        type=_positive_integer,
+        default=500,
+        help='Maximum contraction (and second-fit) iterations [Default=500].',
     )
     optional.add_argument(
         '--decimate_ratio',
@@ -185,20 +205,7 @@ def _get_parser():
         default=0.01,
         help=(
             'Maximum intermediate merge-cluster diameter in voxel units, used by '
-            'contraction-stage decimation. Final branch simplification uses '
-            '--merge_tolerance.'
-        ),
-    )
-    optional.add_argument(
-        '--merge_tolerance',
-        type=float,
-        default=0.25,
-        help=(
-            'Maximum branch simplification error in voxels [Default=0.25]. '
-            '0 retains reference sampling; every foreground tunnel is preserved '
-            'at every setting using 26-connectivity. Higher values allow more aggressive simplification, '
-            'subject to foreground and topology constraints. Without --alternating, '
-            'used only with --second_fitting.'
+            'contraction-stage decimation [Default=0.01].'
         ),
     )
     optional.add_argument(
@@ -246,7 +253,7 @@ def _get_parser():
             'Gradient (iterative solver), better for memory performance on big data, '
             'AMGCG constructs an Algebraic Multigrid (AMG) preconditioner before '
             'running CG, far faster (but may be a bit more memory demanding than pure '
-            'CG). Default is AMGCG.'
+            'CG) [Default=CG].'
         ),
     )
     optional.add_argument(
@@ -259,24 +266,20 @@ def _get_parser():
         ),
     )
     optional.add_argument(
-        '--downsample',
-        action='store_true',
-        help='Unsupported with strict tunnel preservation; using this flag raises an error.',
-    )
-    optional.add_argument(
-        '--seed',
-        type=int,
-        default=42,
-        help='Base random seed for reproducible downsampling [Default=42].',
-    )
-    optional.add_argument(
         '-h', '--help', action='help', help='Show this help message and exit'
     )
     return parser
 
 
 def _main(argv=None):
-    args = _get_parser().parse_args(argv)
+    parser = _get_parser()
+    args = parser.parse_args(argv)
+    fit_options = [name for name in ('fit_w_H', 'fit_w_H_medial') if name in vars(args)]
+    if fit_options and not args.second_fitting:
+        verb = 'require' if len(fit_options) > 1 else 'requires'
+        parser.error(
+            ' and '.join(f'--{name}' for name in fit_options) + f' {verb} --second_fitting.'
+        )
 
     laplacian_skeletonisation(**vars(args))
 

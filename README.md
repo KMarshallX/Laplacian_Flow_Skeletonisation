@@ -30,27 +30,46 @@ live in `laplskel/`:
 
 | Work area               | Main files                                  | Responsibility                                                                                                                                     |
 | ----------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Thinning and refinement | `refinement.py`                           | Topology-preserving voxel deletion, graph extraction, smoothing, and path simplification.                                                          |
+| Thinning and refinement | `refinement.py`                           | Topology-preserving voxel deletion, graph extraction, and the optional second fit.                                                                  |
 | Contraction             | `contraction.py`                          | Laplacian contraction, linear solvers, convergence, and edge collapse.                                                                             |
 | Runtime efficiency      | `parallelisation.py`                      | Component cropping, worker scheduling, and per-component algorithm dispatch. Solver and thinning optimizations also touch their algorithm modules. |
-| Alternating algorithm   | `alternating.py`                          | Experimental contraction/thinning loop and branch fitting; integrates both algorithm areas.                                                        |
-| Shared foundations      | `graph.py`, `medial.py`, `objects.py` | Sparse adjacency/Laplacians, medial guidance, and union-find.                                                                                      |
+| Shared foundations      | `graph.py`, `medial.py`, `objects.py` | Sparse adjacency/Laplacians, medialness scoring, and union-find.                                                                                    |
 | Data utilities          | `utils.py`                                | Component labeling, voxel reconstruction, and GraphML export.                                                                                      |
 
 Thinning and contraction can be developed separately within their modules.
-Coordinate changes to shared helpers, `alternating.py`, and parameter forwarding
-through the CLI, workflow, and component dispatcher. Runtime work spans scheduling
+Coordinate changes to shared helpers and parameter forwarding through the CLI,
+workflow, and component dispatcher. Runtime work spans scheduling
 and algorithm internals, so agree on ownership before editing those internals.
 Preserve coordinate conventions, graph topology, return values, and numerical
 defaults across these boundaries.
 
 ## Standard Workflow Output
 
-By default, the standard (non-`--alternating`) workflow runs contraction, including
-contraction-stage decimation controlled by `--decimate_ratio` and `--dec_grid_size`,
-then topology-preserving thinning and graph extraction. The exported graph keeps every
-digital skeleton voxel as a node, with straight edges between neighbouring voxel
-centres. Add `--second_fitting` to also smooth the extracted graph and simplify its
-branches within `--merge_tolerance`, as earlier versions always did. The NIfTI skeleton
-is the digital skeleton before fitting in both cases. `--second_fitting` has no effect
-with `--alternating`.
+The workflow runs contraction, including contraction-stage decimation controlled by
+`--decimate_ratio` and `--dec_grid_size`, then topology-preserving thinning and graph
+extraction. Contraction always uses EDT-scaled retention, the anisotropic Laplacian and
+hard foreground containment; its medial retention boost `--w_H_medial` defaults to 20.
+The exported graph keeps every digital skeleton voxel as a node, with straight edges
+between neighbouring voxel centres. Add `--second_fitting` to also smooth the node
+positions of the extracted graph with the contraction flow, holding endpoints and junctions in place. The fit
+shares the contraction settings (`--w_L`, `--beta_edt`, `--tol_max_drift`,
+`--tol_mean_drift`, `--max_iter`, `--local_pca_hops`) except its own retention weights,
+`--fit_w_H` (default 0.16) and `--fit_w_H_medial` (default 3), tuned on the synthetic
+trees; these two flags require `--second_fitting`. The fit always uses containment, no
+merging and the LU solver. Every skeleton voxel still stays a node. The NIfTI skeleton
+is the digital skeleton before fitting in both cases.
+
+### Output files
+
+`-o/--output` is required and names the skeleton NIfTI, as an absolute or relative path
+ending in `.nii.gz` or `.nii` (for example `./results/case01/skeleton.nii.gz`). By
+default only this NIfTI is written. Graph files are written only when asked for, each
+at exactly the path given; the ending selects the format. Missing folders are created,
+and two outputs may not share a file.
+
+| Option | Writes |
+| --- | --- |
+| `-o out.nii.gz` / `-o out.nii` | always: the digital skeleton |
+| `--graph_output g.graphml` | the skeleton graph as GraphML |
+| `--graph_output g.npz` | the skeleton graph's sparse adjacency in `g.npz`, coordinates and edge paths in `g_coords.npz` |
+| `--graph_original o.graphml` / `o.npz` | the contracted graph before thinning, same format rules (the `.npz` companion holds coordinates only) |
